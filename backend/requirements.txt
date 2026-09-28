@@ -1,0 +1,11 @@
+fastapi
+sqlmodel
+ezdxf
+pyrealsense2
+opencv-python
+pyinstaller
+uvicorn
+python-multipart
+pystray
+pillow
+websockets
