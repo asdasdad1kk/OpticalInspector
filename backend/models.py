@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional
 
 from sqlmodel import SQLModel, Field
@@ -19,7 +19,7 @@ class User(SQLModel, table=True):
     role: str = "operator"
 
     created_at: datetime = Field(
-        default_factory=datetime.utcnow
+        default_factory=lambda: datetime.now(timezone.utc)
     )
 
 
@@ -36,7 +36,7 @@ class Part(SQLModel, table=True):
     description: Optional[str] = None
 
     created_at: datetime = Field(
-        default_factory=datetime.utcnow
+        default_factory=lambda: datetime.now(timezone.utc)
     )
 
 
@@ -67,8 +67,8 @@ class Drawing(SQLModel, table=True):
     )
 
     created_at: datetime = Field(
-            default_factory=datetime.utcnow
-        )
+        default_factory=lambda: datetime.now(timezone.utc)
+    )
 
 class Inspection(SQLModel, table=True):
     id: int | None = Field(
@@ -104,5 +104,5 @@ class Inspection(SQLModel, table=True):
     approved_at: Optional[datetime] = None
 
     created_at: datetime = Field(
-        default_factory=datetime.utcnow
+        default_factory=lambda: datetime.now(timezone.utc)
     )

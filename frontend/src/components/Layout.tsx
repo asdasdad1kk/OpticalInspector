@@ -2,104 +2,223 @@ import {
   Camera,
   Database,
   FileUp,
-  Maximize,
-  Maximize2,
-  Minimize,
-  Minus,
   ScanLine,
   User,
-  X,
 } from "lucide-react";
 import { NavLink, Outlet } from "react-router-dom";
 
 export default function Layout() {
-   const link = ({ isActive }: { isActive: boolean }) => `flex items-center gap-2 rounded-lg px-3 py-2 text-sm font-medium transition ${isActive ? "bg-emerald-500/15 text-emerald-400 ring-1 ring-emerald-500/20" : "text-zinc-400 hover:bg-zinc-800 hover:text-zinc-100"}`;
+  const link = ({ isActive }: { isActive: boolean }) =>
+    [
+      "group relative flex h-16 items-center gap-2 px-4",
+      "text-sm font-medium transition-colors duration-200",
+      isActive
+        ? "text-white"
+        : "text-zinc-500 hover:text-zinc-200",
+    ].join(" ");
 
   return (
     <div className="min-h-screen bg-zinc-950 text-zinc-100">
-      <header className="sticky top-0 z-50 border-b border-zinc-800 bg-zinc-950/80 backdrop-blur">
-        <div className="mx-auto flex h-16 max-w-[1900px] items-center px-4 lg:px-8">
-          {/* Logo */}
-          <div className="flex items-center gap-3">
-            <div className="grid h-10 w-10 place-items-center rounded-xl bg-emerald-500 text-black shadow-lg shadow-emerald-500/20">
-              <ScanLine size={20} />
+      {/* HEADER */}
+      <header className="border-b border-zinc-800/80 bg-zinc-950">
+        <div className="mx-auto flex h-16 max-w-[1900px] items-center px-5 lg:px-8">
+          
+          {/* BRAND */}
+          <div className="flex min-w-[260px] items-center gap-3">
+            <div className="grid h-9 w-9 shrink-0 place-items-center rounded-lg border border-emerald-500/20 bg-emerald-500/10 text-emerald-400">
+              <ScanLine size={19} strokeWidth={1.8} />
             </div>
 
-            <div>
-              <h1 className="font-semibold text-white">
-                Optical Inspector
-              </h1>
+            <div className="leading-tight">
+              <div className="flex items-center gap-2">
+                <h1 className="text-sm font-semibold tracking-tight text-zinc-100">
+                  Optical Inspector
+                </h1>
 
-              <p className="text-xs text-zinc-500">
-                CAD Vision Station
+                <span className="rounded border border-zinc-800 bg-zinc-900 px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wider text-zinc-500">
+                  Vision
+                </span>
+              </div>
+
+              <p className="mt-0.5 text-[11px] font-medium tracking-wide text-zinc-600">
+                CAD INSPECTION SYSTEM
               </p>
             </div>
           </div>
 
-          {/* Navbar centrado */}
-          <nav className="absolute left-1/2 flex -translate-x-1/2 items-center gap-2 rounded-xl border border-zinc-800 bg-zinc-900/70 p-1 backdrop-blur">
+          {/* NAVIGATION */}
+          <nav
+            aria-label="Main navigation"
+            className="ml-8 flex h-full items-center"
+          >
             <NavLink to="/upload" className={link}>
-              <FileUp size={16} />
-              Drawing
+              {({ isActive }) => (
+                <>
+                  <FileUp
+                    size={16}
+                    strokeWidth={1.8}
+                    className={
+                      isActive
+                        ? "text-emerald-400"
+                        : "text-zinc-500 transition-colors group-hover:text-zinc-300"
+                    }
+                  />
+
+                  <span>Drawing</span>
+
+                  {isActive && (
+                    <span className="absolute inset-x-3 bottom-0 h-0.5 rounded-t bg-emerald-400" />
+                  )}
+                </>
+              )}
             </NavLink>
 
             <NavLink to="/inspect" className={link}>
-              <Camera size={16} />
-              Inspection
+              {({ isActive }) => (
+                <>
+                  <Camera
+                    size={16}
+                    strokeWidth={1.8}
+                    className={
+                      isActive
+                        ? "text-emerald-400"
+                        : "text-zinc-500 transition-colors group-hover:text-zinc-300"
+                    }
+                  />
+
+                  <span>Inspection</span>
+
+                  {isActive && (
+                    <span className="absolute inset-x-3 bottom-0 h-0.5 rounded-t bg-emerald-400" />
+                  )}
+                </>
+              )}
             </NavLink>
 
             <NavLink to="/database" className={link}>
-              <Database size={16} />
-              Database
+              {({ isActive }) => (
+                <>
+                  <Database
+                    size={16}
+                    strokeWidth={1.8}
+                    className={
+                      isActive
+                        ? "text-emerald-400"
+                        : "text-zinc-500 transition-colors group-hover:text-zinc-300"
+                    }
+                  />
+
+                  <span>Database</span>
+
+                  {isActive && (
+                    <span className="absolute inset-x-3 bottom-0 h-0.5 rounded-t bg-emerald-400" />
+                  )}
+                </>
+              )}
             </NavLink>
           </nav>
 
-          {/* Usuario */}
-          <div className="ml-auto flex items-center gap-3">
-            <div className="hidden text-right md:block">
-              <p className="text-sm font-medium text-white">
-                Daniel Paniagua
-              </p>
+          {/* RIGHT SIDE */}
+          <div className="ml-auto flex h-full items-center">
+            {/* STATUS */}
+            <div className="mr-5 hidden items-center gap-2 border-r border-zinc-800 pr-5 lg:flex">
+              <span className="relative flex h-2 w-2">
+                <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-emerald-400 opacity-30" />
+                <span className="relative inline-flex h-2 w-2 rounded-full bg-emerald-400" />
+              </span>
 
-              <p className="text-xs text-zinc-500">
-                Manufacturing Engineer
-              </p>
+              <span className="text-xs font-medium text-zinc-500">
+                System online
+              </span>
             </div>
 
-            <button className="flex h-10 w-10 items-center justify-center rounded-full border border-emerald-500/30 bg-emerald-500/10 text-emerald-400 transition hover:bg-emerald-500/20">
-              <User size={18} />
+            {/* USER */}
+            <button
+              type="button"
+              className="group flex items-center gap-3 rounded-lg px-2 py-1.5 text-left transition-colors hover:bg-zinc-900"
+              aria-label="Open user menu"
+            >
+              <div className="hidden text-right md:block">
+                <p className="text-xs font-medium text-zinc-200">
+                  Daniel Paniagua
+                </p>
+
+                <p className="mt-0.5 text-[10px] text-zinc-600">
+                  Manufacturing Engineer
+                </p>
+              </div>
+
+              <div className="grid h-8 w-8 place-items-center rounded-lg border border-zinc-800 bg-zinc-900 text-zinc-400 transition-colors group-hover:border-zinc-700 group-hover:text-zinc-200">
+                <User size={15} strokeWidth={1.8} />
+              </div>
             </button>
           </div>
-          <div className="ml-6 flex items-center border-l border-zinc-800 pl-4">
-  <button
-    className="grid h-8 w-10 place-items-center text-zinc-400 transition hover:bg-zinc-800 hover:text-white"
-    onClick={() => window.pywebview?.api?.minimize?.()}
-  >
-    <Minus size={16} />
-  </button>
-
-  <button
-    className="grid h-8 w-10 place-items-center text-zinc-400 transition hover:bg-zinc-800 hover:text-white"
-    onClick={() => window.pywebview?.api?.toggleMaximize?.()}
-  >
-    <Maximize2 size={14} />
-  </button>
-
-  <button
-    className="grid h-8 w-10 place-items-center text-zinc-400 transition hover:bg-red-500 hover:text-white"
-    onClick={() => window.pywebview?.api?.close?.()}
-  >
-    <X size={16} />
-  </button>
-</div>
         </div>
-        {/* Ventana */}
-
       </header>
 
-      <main className="mx-auto max-w-[1600px] p-4 lg:p-8">
-        <Outlet />
-      </main>
+    {/* CONTENT */}
+<main className="relative min-h-[calc(100vh-4rem)] overflow-hidden bg-zinc-950">
+  {/* Grid técnico animado */}
+  <div
+    aria-hidden="true"
+   className="technical-grid pointer-events-none absolute inset-0 opacity-[0.14]"
+    style={{
+      backgroundImage: `
+        linear-gradient(to right, #3f3f46 1px, transparent 1px),
+        linear-gradient(to bottom, #3f3f46 1px, transparent 1px)
+      `,
+      backgroundSize: "32px 32px",
+    }}
+  />
+
+  {/* Glow ambiental superior */}
+  <div
+    aria-hidden="true"
+    className="ambient-glow pointer-events-none absolute -left-[10%] -top-40 h-[500px] w-[120%]"
+    style={{
+      background:
+        "radial-gradient(ellipse at center, rgba(16,185,129,0.09), transparent 60%)",
+      filter: "blur(35px)",
+    }}
+  />
+
+  {/* Segundo glow estático */}
+  <div
+    aria-hidden="true"
+    className="pointer-events-none absolute -right-64 top-[35%] h-[500px] w-[500px] rounded-full bg-emerald-500/[0.025] blur-3xl"
+  />
+
+  {/* Oscurecimiento para profundidad */}
+  <div
+    aria-hidden="true"
+    className="pointer-events-none absolute inset-0"
+    style={{
+      background: `
+        radial-gradient(
+          ellipse at center,
+          transparent 0%,
+          transparent 45%,
+          rgba(9, 9, 11, 0.35) 100%
+        )
+      `,
+    }}
+  />
+
+  {/* Degradado vertical */}
+  <div
+    aria-hidden="true"
+    className="pointer-events-none absolute inset-0"
+    style={{
+      background:
+        "linear-gradient(to bottom, rgba(9,9,11,0.05), transparent 180px, rgba(9,9,11,0.20) 100%)",
+    }}
+  />
+
+  {/* CONTENIDO */}
+  <div className="relative z-10 mx-auto max-w-[1600px] p-4 md:p-6 lg:p-8 xl:p-10">
+    <Outlet />
+  </div>
+</main>
     </div>
   );
 }
