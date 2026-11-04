@@ -5,9 +5,11 @@ import {
   CheckCircle2,
   CircleStop,
   ImageIcon,
+  Gauge,
   LoaderCircle,
   MousePointerClick,
   Play,
+  Scan,
   ScanSearch,
   Trash2,
   UploadCloud,
@@ -18,6 +20,7 @@ import {
   captureSnapshot,
   getCameraStatus,
   saveReference,
+  scanDepth,
   startCamera,
   stopCamera,
   type CameraStartOptions,
@@ -31,6 +34,7 @@ const PartViewer3D = lazy(() => import("../components/PartViewer3D"));
 import { EDITABLE_TYPES, FEATURE_TYPES, typeLabel } from "../components/FeatureInfo";
 import type {
   CameraStatus,
+  ScanInfo,
   ReferenceAnalysis,
   ReferenceCategories,
   ReferenceFeature,
@@ -71,6 +75,9 @@ export default function ReferencePage() {
   const [analyzing, setAnalyzing] = useState(false);
   const [addMode, setAddMode] = useState(false);
   const [view, setView] = useState<"2d" | "3d">("2d");
+  const [scanId, setScanId] = useState<string>();
+  const [scanInfo, setScanInfo] = useState<ScanInfo>();
+  const [scanning, setScanning] = useState(false);
   const [imageDims, setImageDims] = useState<{ width: number; height: number }>();
 
   const [partNo, setPartNo] = useState("");
@@ -124,9 +131,28 @@ export default function ReferencePage() {
     try {
       setError(undefined);
       resetAnalysis();
+      setScanId(undefined);
+      setScanInfo(undefined);
       setPhoto(await captureSnapshot());
     } catch (caught) {
       setError(message(caught, "No fue posible capturar la imagen."));
+    }
+  }
+
+  // Escaneo 3D: foto a color + profundidad de la RealSense promediada en el mismo instante.
+  async function handleScan() {
+    try {
+      setScanning(true);
+      setError(undefined);
+      resetAnalysis();
+      const { photo: scanned, info } = await scanDepth(16);
+      setPhoto(scanned);
+      setScanId(info.scan_id);
+      setScanInfo(info);
+    } catch (caught) {
+      setError(message(caught, "No fue posible escanear la pieza."));
+    } finally {
+      setScanning(false);
     }
   }
 
@@ -136,11 +162,15 @@ export default function ReferencePage() {
     if (!file) return;
     setError(undefined);
     resetAnalysis();
+    setScanId(undefined);
+    setScanInfo(undefined);
     setPhoto(file);
   }
 
   function discardPhoto() {
     setPhoto(undefined);
+    setScanId(undefined);
+    setScanInfo(undefined);
     resetAnalysis();
   }
 
@@ -151,7 +181,12 @@ export default function ReferencePage() {
       setError(undefined);
       setSaved(undefined);
       const length = Number(knownLength);
-      const result = await analyzeReference(photo, Number.isFinite(length) && length > 0 ? length : undefined, knownAxis);
+      const result = await analyzeReference(
+        photo,
+        Number.isFinite(length) && length > 0 ? length : undefined,
+        knownAxis,
+        scanId,
+      );
       // Con calibración, las coordenadas están en la imagen corregida.
       setCorrectedUrl(result.image_jpeg ? `data:image/jpeg;base64,${result.image_jpeg}` : undefined);
       setAnalysis(result);
@@ -211,10 +246,12 @@ export default function ReferencePage() {
     try {
       setSaving(true);
       setError(undefined);
-      const { preview_png: _preview, image_jpeg: _image, ...reference } = analysis;
+      const { preview_png: _preview, image_jpeg: _image, relief: _relief, scan_id: _scan, ...reference } = analysis;
       void _preview;
       void _image;
-      setSaved(await saveReference({ photo, partNo, revision, description, reference }));
+      void _relief;
+      void _scan;
+      setSaved(await saveReference({ photo, partNo, revision, description, reference, scanId }));
     } catch (caught) {
       setError(message(caught, "No fue posible guardar la pieza patrón."));
     } finally {
@@ -396,6 +433,7 @@ export default function ReferencePage() {
                     unit,
                     contour: analysis.contour,
                     features: analysis.features,
+                    relief: analysis.relief,
                     texture: imageDims
                       ? { url: correctedUrl ?? photoUrl, width: imageDims.width, height: imageDims.height, scale }
                       : null,
@@ -470,9 +508,28 @@ export default function ReferencePage() {
             </p>
             <div className="flex gap-2">
               {source === "camera" && !photo && (
-                <button type="button" className={buttonPrimary} onClick={handleCapture} disabled={!camera?.running}>
-                  <Camera size={16} /> Capturar
-                </button>
+                <>
+                  <button
+                    type="button"
+                    className={camera?.depth_available ? buttonSecondary : buttonPrimary}
+                    onClick={handleCapture}
+                    disabled={!camera?.running || scanning}
+                  >
+                    <Camera size={16} /> Capturar
+                  </button>
+                  {camera?.depth_available && (
+                    <button
+                      type="button"
+                      className={buttonPrimary}
+                      onClick={handleScan}
+                      disabled={!camera?.running || scanning}
+                      title="Foto + profundidad de la RealSense (16 cuadros promediados): mide escala real, espesor, planitud y alturas."
+                    >
+                      {scanning ? <LoaderCircle size={16} className="animate-spin" /> : <Scan size={16} />}
+                      {scanning ? "Escaneando..." : "Escanear 3D"}
+                    </button>
+                  )}
+                </>
               )}
               {photo && (
                 <button type="button" className={buttonSecondary} onClick={discardPhoto}>
@@ -532,8 +589,16 @@ export default function ReferencePage() {
                 </div>
               </label>
               <p className="text-xs text-zinc-600">
-                Sin dimensión conocida se usa la escala medida en Configuración › Cámara (si existe); si no, las medidas quedan en píxeles.
+                {scanId
+                  ? "Escaneo 3D listo: sin dimensión conocida, la escala se mide con la profundidad de la cámara."
+                  : "Sin dimensión conocida se usa la escala medida en Configuración › Cámara (si existe); si no, las medidas quedan en píxeles."}
               </p>
+              {scanInfo && (
+                <p className="rounded-lg bg-emerald-500/10 px-3 py-2 text-xs text-emerald-300">
+                  Profundidad capturada: {scanInfo.frames} cuadros, {(scanInfo.valid_fraction * 100).toFixed(0)} % de píxeles
+                  válidos{scanInfo.noise_mm !== null ? `, ruido ${scanInfo.noise_mm.toFixed(2)} mm` : ""}.
+                </p>
+              )}
               <button type="button" className={`${buttonPrimary} w-full`} onClick={handleAnalyze} disabled={!photo || analyzing}>
                 {analyzing ? <LoaderCircle size={16} className="animate-spin" /> : <ScanSearch size={16} />}
                 {analyzing ? "Analizando..." : "Analizar pieza"}
@@ -543,6 +608,70 @@ export default function ReferencePage() {
 
           {analysis && (
             <>
+              {analysis.relief && (
+                <section className="rounded-2xl border border-zinc-800 bg-zinc-900/60 p-5">
+                  <div className="flex items-center justify-between">
+                    <h2 className="flex items-center gap-2 font-semibold">
+                      <Gauge size={16} className="text-emerald-400" /> Profundidad (RealSense)
+                    </h2>
+                    {analysis.relief.available && (
+                      <span
+                        className={`rounded px-1.5 py-0.5 text-[10px] font-semibold ${
+                          analysis.relief.measures.quality === "Buena"
+                            ? "bg-emerald-500/15 text-emerald-300"
+                            : analysis.relief.measures.quality === "Regular"
+                              ? "bg-amber-500/15 text-amber-300"
+                              : "bg-red-500/15 text-red-300"
+                        }`}
+                      >
+                        {analysis.relief.measures.quality}
+                      </span>
+                    )}
+                  </div>
+                  {analysis.relief.available ? (
+                    <>
+                      <dl className="mt-3 grid grid-cols-2 gap-3 text-xs">
+                        <div>
+                          <dt className="text-zinc-500">Inclinación</dt>
+                          <dd className={`font-medium ${analysis.relief.measures.tilt_deg > 3 ? "text-amber-300" : ""}`}>
+                            {analysis.relief.measures.tilt_deg.toFixed(1)}°
+                          </dd>
+                        </div>
+                        <div>
+                          <dt className="text-zinc-500">Espesor</dt>
+                          <dd className="font-medium">
+                            {analysis.relief.measures.thickness_mm !== null
+                              ? `${analysis.relief.measures.thickness_mm.toFixed(2)} mm`
+                              : "no medido"}
+                          </dd>
+                        </div>
+                        <div>
+                          <dt className="text-zinc-500">Planitud (P-V)</dt>
+                          <dd className="font-medium">
+                            {analysis.relief.measures.flatness_mm !== null
+                              ? `${analysis.relief.measures.flatness_mm.toFixed(2)} mm`
+                              : "—"}
+                          </dd>
+                        </div>
+                        <div>
+                          <dt className="text-zinc-500">Distancia</dt>
+                          <dd className="font-medium">{analysis.relief.measures.distance_mm.toFixed(0)} mm</dd>
+                        </div>
+                      </dl>
+                      {analysis.relief.measures.warnings.map((warning) => (
+                        <p key={warning} className="mt-3 rounded-lg bg-amber-500/10 px-3 py-2 text-xs text-amber-300">
+                          {warning}
+                        </p>
+                      ))}
+                    </>
+                  ) : (
+                    <p className="mt-3 rounded-lg bg-amber-500/10 px-3 py-2 text-xs text-amber-300">
+                      {analysis.relief.reason ?? "No se pudo medir el relieve."} Se usa el modelo estimado a partir de la foto.
+                    </p>
+                  )}
+                </section>
+              )}
+
               <section className="rounded-2xl border border-zinc-800 bg-zinc-900/60 p-5">
                 <h2 className="font-semibold">Qué verificar</h2>
                 <div className="mt-3 space-y-2">
@@ -576,7 +705,8 @@ export default function ReferencePage() {
                   <div>
                     <dt className="text-zinc-500">Escala</dt>
                     <dd className="font-medium">{analysis.relative ? "relativa" : `${(1 / scale).toFixed(2)} px/mm`}
-                      {analysis.scale_source === "calibracion" ? " (calibración)" : ""}</dd>
+                      {analysis.scale_source === "calibracion" ? " (calibración)" : ""}
+                      {analysis.scale_source === "profundidad" ? " (profundidad)" : ""}</dd>
                   </div>
                 </dl>
               </section>

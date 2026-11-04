@@ -123,6 +123,7 @@ def detect_features(image: np.ndarray) -> list[dict[str, Any]]:
             "y_px": candidate["y"],
             "radius_px": float(radius),
             "bore_px": float(radius if shape_type["observed_type"] == "BARRENO" else shape_type["hole_radius_px"]),
+            "rim_px": shape_type.get("rim_radius_px"),
             "response": candidate["response"],
             "material": MATERIAL_BY_TYPE[shape_type["observed_type"]],
             "saturation": color["saturation"],
@@ -152,6 +153,36 @@ def detect_features(image: np.ndarray) -> list[dict[str, Any]]:
 # ============================================================
 # HUECOS GRANDES
 # ============================================================
+
+def rescale_analysis(analysis: dict[str, Any], factor: float, source: str) -> dict[str, Any]:
+    """Convierte un analisis en pixeles (escala 1) a unidades reales: `factor` mm por pixel."""
+    for feature in analysis["features"]:
+        for key in ("x", "y", "radius", "outer_radius", "bore_radius"):
+            feature[key] = round(feature[key] * factor, 4)
+    analysis["contour"] = [[round(x * factor, 4), round(y * factor, 4)] for x, y in analysis["contour"]]
+    analysis["bounds"] = {key: round(value * factor, 4) for key, value in analysis["bounds"].items()}
+    if analysis.get("label"):
+        for key in ("x", "y", "w", "h"):
+            analysis["label"][key] = round(analysis["label"][key] * factor, 4)
+    dims = analysis["dimensions"]
+    dims.update({
+        "length": round(dims["length"] * factor, 3),
+        "width": round(dims["width"] * factor, 3),
+        "area": round(dims["area"] * factor * factor, 2),
+        "unit": "mm",
+    })
+    analysis["scale"] = analysis["scale"] * factor
+    analysis["relative"] = False
+    analysis["scale_source"] = source
+    return analysis
+
+
+def _outer_px(item: dict[str, Any]) -> float:
+    """Radio exterior del feature (cabeza del delron, disco del inserto), en pixeles."""
+    if item["type"] == "BARRENO":
+        return float(item["radius_px"])
+    return float(item.get("rim_px") or max(2.2 * item["bore_px"], item["radius_px"]))
+
 
 def detect_large_holes(
     image: np.ndarray,
@@ -362,9 +393,10 @@ def analyze_reference(
             "x": round(item["x_px"] * scale, 4),
             "y": round(-item["y_px"] * scale, 4),
             "radius": round(max(item["radius_px"], 3.0) * scale, 4),
-            # Radio del barreno central (para el modelo 3D); en insertos/delrones es menor que `radius`.
+            # Para el modelo 3D: radio exterior de la cabeza/disco y del barreno central.
+            "outer_radius": round(_outer_px(item) * scale, 4),
             "bore_radius": round(
-                (item["radius_px"] if item["type"] == "BARRENO" else min(item["bore_px"], 0.9 * item["radius_px"])) * scale, 4
+                (item["radius_px"] if item["type"] == "BARRENO" else min(item["bore_px"], 0.85 * _outer_px(item))) * scale, 4
             ),
             "enabled": True,
             "radius_reliable": item["radius_reliable"],

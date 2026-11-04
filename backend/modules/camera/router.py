@@ -6,6 +6,7 @@ from fastapi import APIRouter, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.responses import Response
 from pydantic import BaseModel, Field
 
+from . import scans
 from .service import camera_service
 
 
@@ -41,6 +42,40 @@ def start_camera(data: CameraStartRequest) -> dict:
         }
     except (ValueError, RuntimeError) as error:
         raise HTTPException(status_code=500, detail=str(error)) from error
+
+
+class ScanRequest(BaseModel):
+    frames: int = Field(default=16, ge=3, le=60, description="Cuadros de profundidad a promediar")
+
+
+@router.post("/scan")
+def scan_3d(data: ScanRequest) -> dict:
+    """Escaneo 3D: color + mediana temporal de la profundidad alineada (solo RealSense)."""
+    try:
+        result = camera_service.capture_depth_scan(frames=data.frames)
+    except RuntimeError as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
+    height, width = result["color"].shape[:2]
+    scan_id = scans.save_scan(
+        result["color"], result["depth_mm"], result["intrinsics"],
+        {"noise_mm": result["noise_mm"], "frames": result["frames"], "valid_fraction": result["valid_fraction"]},
+    )
+    return {
+        "scan_id": scan_id,
+        "frames": result["frames"],
+        "valid_fraction": round(result["valid_fraction"], 3),
+        "noise_mm": None if result["noise_mm"] != result["noise_mm"] else round(result["noise_mm"], 3),
+        "width": width,
+        "height": height,
+    }
+
+
+@router.get("/scan/{scan_id}/color.jpg")
+def scan_color(scan_id: str) -> Response:
+    try:
+        return Response(content=scans.color_jpeg(scan_id), media_type="image/jpeg")
+    except scans.ScanNotFound as error:
+        raise HTTPException(status_code=404, detail=str(error)) from error
 
 
 @router.post("/restart")

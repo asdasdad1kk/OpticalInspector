@@ -412,6 +412,9 @@ def _classify_feature_type_once(
     inner_peak = float(fine_gradient[fine <= 1.3 * hole].max())
     outer = fine_gradient[(fine >= 1.5 * hole) & (fine <= 3.6 * hole)]
     ring_ratio = float(outer.max() / inner_peak) if len(outer) and inner_peak > 0 else 0.0
+    # Radio del borde exterior (cabeza del delron / disco del inserto): el mayor gradiente tras el hueco.
+    outer_radii = fine[(fine >= 1.5 * hole) & (fine <= 3.6 * hole)]
+    rim_radius = float(outer_radii[int(np.argmax(outer))]) if len(outer) and ring_ratio >= 0.12 else None
 
     cone_score = sat_in + (sat_in - sat_out)
     disk_ratio = disk / max(plate, 1.0)
@@ -449,6 +452,7 @@ def _classify_feature_type_once(
         "disk_ratio": round(disk_ratio, 3),
         "ring_ratio": round(ring_ratio, 3),
         "interior_ratio": round(interior_ratio, 3),
+        "rim_radius_px": None if rim_radius is None or observed == "BARRENO" else round(rim_radius, 2),
     }
 
 

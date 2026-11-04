@@ -12,7 +12,9 @@ from sqlmodel import Session, select
 from core import config, storage
 from core.db import get_session
 from models import Drawing, Part
-from modules.inspect.golden import DEFAULT_ENABLED, analyze_reference, draw_reference_preview
+from modules.camera import scans
+from modules.inspect.golden import DEFAULT_ENABLED, analyze_reference, draw_reference_preview, rescale_analysis
+from modules.reference import relief as relief_lib
 from modules.inspect.calibration import calibration_service
 from modules.inspect.service import decode_image, encode_png, prepare_image
 
@@ -40,11 +42,34 @@ def _serialize(analysis: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _measure_relief(scan: dict[str, Any], analysis: dict[str, Any], use_depth_scale: bool) -> dict[str, Any]:
+    """Mide el relieve del escaneo con el analisis actual; con `use_depth_scale` pasa el
+    analisis (en pixeles) a milimetros reales y le agrega la altura de cada feature."""
+    scale = float(analysis["scale"]) or 1.0
+    result = relief_lib.build_relief(
+        scan["depth_mm"], scan["intrinsics"],
+        relief_lib.contour_to_px(analysis["contour"], scale),
+        relief_lib.features_to_px(analysis["features"], scale),
+        noise_mm=scan.get("noise_mm"),
+    )
+    if not result["available"]:
+        return result
+    if use_depth_scale and analysis.get("relative"):
+        rescale_analysis(analysis, result["measures"]["scale_mm_per_px"], "profundidad")
+    for feature in analysis["features"]:
+        measured = result["feature_heights"].get(str(feature["id"]))
+        if measured:
+            feature["height_mm"] = measured["height_mm"]
+            feature["height_reliable"] = measured["reliable"]
+    return relief_lib.to_model(result, analysis["scale"])
+
+
 @router.post("/analyze")
 async def analyze(
     photo: UploadFile = File(...),
     known_length: float | None = Form(default=None),
     known_axis: str = Form(default="long"),
+    scan_id: str | None = Form(default=None),
 ) -> dict[str, Any]:
     """Analiza una captura de la pieza real y devuelve todos sus features.
 
@@ -60,19 +85,42 @@ async def analyze(
     if known_length is not None and known_length <= 0:
         raise HTTPException(status_code=422, detail="known_length debe ser mayor que cero.")
 
+    scan = None
+    if scan_id:
+        try:
+            scan = scans.load_scan(scan_id)
+        except scans.ScanNotFound as error:
+            raise HTTPException(status_code=404, detail=str(error)) from error
+
     try:
-        raw = decode_image(data)
-        image = calibration_service.undistort(raw)
-        undistorted = image is not raw
-        plane_scale = None
-        if not known_length:
-            plane_scale = calibration_service.plane_scale_for((image.shape[1], image.shape[0]))
-        analysis = analyze_reference(image, known_length, known_axis, plane_scale)
+        if scan is not None:
+            # Con escaneo 3D se usan los intrinsecos de fabrica de la RealSense: no se aplica
+            # la calibracion de lente del usuario, para que color y profundidad sigan alineados.
+            raw = image = scan["color"]
+            undistorted = False
+            analysis = analyze_reference(image, known_length, known_axis, None)
+        else:
+            raw = decode_image(data)
+            image = calibration_service.undistort(raw)
+            undistorted = image is not raw
+            plane_scale = None
+            if not known_length:
+                plane_scale = calibration_service.plane_scale_for((image.shape[1], image.shape[0]))
+            analysis = analyze_reference(image, known_length, known_axis, plane_scale)
     except ValueError as error:
         raise HTTPException(status_code=400, detail=str(error)) from error
     except Exception as error:
         raise HTTPException(status_code=500, detail=f"Error analizando la pieza: {error}") from error
+    relief_payload: dict[str, Any] | None = None
+    if scan is not None:
+        try:
+            relief_payload = _measure_relief(scan, analysis, use_depth_scale=not known_length)
+        except Exception as error:  # la medicion de profundidad nunca debe impedir el alta
+            relief_payload = {"available": False, "reason": f"No se pudo medir el relieve: {error}"}
     payload = _serialize(analysis)
+    if relief_payload is not None:
+        payload["relief"] = relief_payload
+        payload["scan_id"] = scan_id
     if undistorted:
         # Las coordenadas estan en la imagen corregida: el cliente debe mostrarla.
         ok, encoded = cv2.imencode(".jpg", image, [cv2.IMWRITE_JPEG_QUALITY, 92])
@@ -87,6 +135,7 @@ async def save(
     description: str | None = Form(default=None),
     reference: str = Form(..., description="JSON editado devuelto por /analyze"),
     photo: UploadFile = File(...),
+    scan_id: str | None = Form(default=None),
     session: Session = Depends(get_session),
 ) -> dict[str, Any]:
     """Guarda la pieza patron (features editados) como un Drawing de origen real."""
@@ -108,9 +157,16 @@ async def save(
     if enabled["features"] and len(active) < 4:
         raise HTTPException(status_code=422, detail="Se necesitan al menos 4 features activos.")
 
+    scan = None
+    if scan_id:
+        try:
+            scan = scans.load_scan(scan_id)
+        except scans.ScanNotFound as error:
+            raise HTTPException(status_code=404, detail=str(error)) from error
+
     photo_bytes = await photo.read()
     try:
-        image = prepare_image(photo_bytes)
+        image = scan["color"] if scan is not None else prepare_image(photo_bytes)
     except ValueError as error:
         raise HTTPException(status_code=400, detail=str(error)) from error
 
@@ -120,6 +176,27 @@ async def save(
     ok, encoded_photo = cv2.imencode(".jpg", image, [cv2.IMWRITE_JPEG_QUALITY, 90])
     if ok:
         photo_path = storage.save_bytes(config.IMAGES_DIR, encoded_photo.tobytes(), "reference", ".jpg")
+    # Relieve medido: se recalcula con los features ya editados por el usuario.
+    relief_json: dict[str, Any] | None = None
+    depth_path: str | None = None
+    if scan is not None:
+        try:
+            measured = relief_lib.build_relief(
+                scan["depth_mm"], scan["intrinsics"],
+                relief_lib.contour_to_px(payload.get("contour", []), scale),
+                relief_lib.features_to_px(features, scale),
+                noise_mm=scan.get("noise_mm"),
+            )
+        except Exception:
+            measured = {"available": False}
+        if measured.get("available"):
+            for item in features:
+                height = measured["feature_heights"].get(str(item["id"]))
+                if height:
+                    item["height_mm"], item["height_reliable"] = height["height_mm"], height["reliable"]
+            relief_json = relief_lib.to_model(measured, scale)
+            relief_json.pop("feature_heights", None)
+            depth_path = storage.save_bytes(config.IMAGES_DIR, scan["depth_raw"], "depth", ".npz")
     contour_px = np.float32([[x / scale, -y / scale] for x, y in payload.get("contour", [])])
     preview = draw_reference_preview(
         image,
@@ -128,6 +205,12 @@ async def save(
         None,
         scale,
     )
+
+    relief_path: str | None = None
+    if relief_json is not None:
+        relief_path = storage.save_bytes(
+            config.IMAGES_DIR, json.dumps(relief_json).encode("utf-8"), "relief", ".json"
+        )
 
     try:
         part = session.exec(
@@ -164,6 +247,9 @@ async def save(
                     "enabled": enabled,
                     "photo_path": photo_path,
                     "image_size": [int(image.shape[1]), int(image.shape[0])],
+                    "relief_path": relief_path,
+                    "depth_path": depth_path,
+                    "scan_intrinsics": scan["intrinsics"] if scan is not None and relief_json else None,
                 },
             },
         )
@@ -232,6 +318,13 @@ def get_model(drawing_id: int, session: Session = Depends(get_session)) -> dict[
         ]
         unit, texture = "mm", None
 
+    relief = None
+    if golden and golden.get("relief_path"):
+        try:
+            relief = json.loads(storage.read_bytes(config.IMAGES_DIR, golden["relief_path"]))
+        except (OSError, ValueError):
+            relief = None
+
     return {
         "drawing_id": drawing_id,
         "part_number": part.part_number if part else "",
@@ -242,6 +335,7 @@ def get_model(drawing_id: int, session: Session = Depends(get_session)) -> dict[
         "bounds": bounds,
         "features": items,
         "texture": texture,
+        "relief": relief,
     }
 
 

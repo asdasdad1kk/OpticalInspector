@@ -23,6 +23,8 @@ export interface CameraStatus {
   device_name?: string | null;
   serial_number?: string | null;
   last_error?: string | null;
+  /** RealSense con stream de profundidad activo: permite escanear en 3D. */
+  depth_available?: boolean;
 }
 
 export interface InspectionResponse {
@@ -145,6 +147,50 @@ export interface ReferenceFeature {
   radius_reliable?: boolean;
   /** Radio del barreno central (insertos/delrones); para el modelo 3D. */
   bore_radius?: number;
+  /** Radio exterior de la cabeza/disco; para el modelo 3D. */
+  outer_radius?: number;
+  /** Altura sobre la placa medida con profundidad (mm). */
+  height_mm?: number;
+  height_reliable?: boolean;
+}
+
+/** Medidas obtenidas con la profundidad de la RealSense. */
+export interface ReliefMeasures {
+  scale_mm_per_px: number;
+  distance_mm: number;
+  tilt_deg: number;
+  thickness_mm: number | null;
+  thickness_source: string | null;
+  flatness_mm: number | null;
+  rms_mm: number | null;
+  plane_rms_mm: number;
+  valid_fraction: number;
+  noise_mm: number | null;
+  quality: "Buena" | "Regular" | "Pobre";
+  warnings: string[];
+}
+
+/** Malla de alturas respecto al plano de la placa (int16 little-endian en base64). */
+export interface ReliefGrid {
+  width: number;
+  height: number;
+  step_px: number;
+  quant_mm: number;
+  data_b64: string;
+  bounds: { x0: number; x1: number; y0: number; y1: number };
+}
+
+export type Relief =
+  | { available: false; reason?: string }
+  | { available: true; grid: ReliefGrid; measures: ReliefMeasures };
+
+export interface ScanInfo {
+  scan_id: string;
+  frames: number;
+  valid_fraction: number;
+  noise_mm: number | null;
+  width: number;
+  height: number;
 }
 
 export interface ReferenceCategories {
@@ -164,8 +210,10 @@ export interface ReferenceAnalysis {
   relative: boolean;
   enabled: ReferenceCategories;
   preview_png: string;
-  scale_source?: "dimension" | "calibracion" | "relativa";
+  scale_source?: "dimension" | "calibracion" | "relativa" | "profundidad";
   image_jpeg?: string | null;
+  relief?: Relief;
+  scan_id?: string;
 }
 
 /** Resultado por feature guardado en la inspección (coordenadas del canvas rectificado). */
@@ -203,4 +251,5 @@ export interface PartModelResponse {
   contour: [number, number][];
   features: ReferenceFeature[];
   texture: { url: string; width: number; height: number; scale: number } | null;
+  relief: Relief | null;
 }
