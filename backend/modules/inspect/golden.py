@@ -16,19 +16,20 @@ from typing import Any
 import cv2
 import numpy as np
 
-from .pipeline import classify_color, classify_feature_type, measure_radius
+from .pipeline import LARGE_HOLE_MIN_PX, classify_color, classify_feature_type, classify_large_hole, measure_radius
 from .registration import detect_blob_candidates
 
 FEATURE_CATEGORIES = ("features", "contour", "distances", "label")
 
 DEFAULT_ENABLED = {key: True for key in FEATURE_CATEGORIES}
 
-MATERIAL_BY_TYPE = {"INSERTO": "ACERO", "DELRON_CONICO": "DELRON", "DELRON_PLANO": "DELRON"}
+MATERIAL_BY_TYPE = {"INSERTO": "ACERO", "DELRON_CONICO": "DELRON", "DELRON_PLANO": "DELRON", "BARRENO": "BARRENO"}
 # Mismos colores (BGR) que el preview del DXF.
 TYPE_COLORS = {
     "INSERTO": (0, 165, 255),
     "DELRON_CONICO": (255, 0, 255),
     "DELRON_PLANO": (0, 200, 0),
+    "BARRENO": (255, 200, 0),
 }
 
 
@@ -148,6 +149,70 @@ def detect_features(image: np.ndarray) -> list[dict[str, Any]]:
 
 
 # ============================================================
+# HUECOS GRANDES
+# ============================================================
+
+def detect_large_holes(
+    image: np.ndarray,
+    inside: np.ndarray,
+    features: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Huecos circulares grandes (se ve el fondo a traves), p. ej. el del centro.
+
+    El detector de blobs solo llega a radios de ~10 px, asi que se buscan con
+    Hough y se validan: el centro debe estar dentro de la pieza, el interior no
+    debe contener otro feature (un delron/inserto tambien es un disco) y el
+    borde debe ser circular y continuo (classify_large_hole).
+    """
+    height, width = image.shape[:2]
+    longest = max(height, width)
+    scale = min(1.0, 800.0 / longest)
+    small = cv2.resize(image, None, fx=scale, fy=scale, interpolation=cv2.INTER_AREA) if scale < 1.0 else image
+    blurred = cv2.GaussianBlur(cv2.cvtColor(small, cv2.COLOR_BGR2GRAY), (0, 0), 2.0)
+    min_radius = max(15, int(0.03 * max(small.shape[:2])))
+    circles = cv2.HoughCircles(
+        blurred, cv2.HOUGH_GRADIENT, dp=1.2, minDist=min_radius * 2,
+        param1=120, param2=35, minRadius=min_radius, maxRadius=int(0.2 * max(small.shape[:2])),
+    )
+    if circles is None:
+        return []
+
+    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+    hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
+    found: list[dict[str, Any]] = []
+    for cx, cy, radius in circles[0]:
+        cx, cy, radius = float(cx) / scale, float(cy) / scale, float(radius) / scale
+        if radius < LARGE_HOLE_MIN_PX * (width / 1800.0):
+            continue
+        px, py = int(round(cx)), int(round(cy))
+        if not (0 <= px < width and 0 <= py < height) or inside[py, px] == 0:
+            continue
+        if any(math.hypot(f["x_px"] - cx, f["y_px"] - cy) < radius for f in features):
+            continue
+        verdict = classify_large_hole(gray, hsv, cx, cy, radius)
+        if verdict is None:
+            continue
+        # Hueco entero dentro de la pieza (no una muesca del contorno).
+        probe = np.zeros_like(inside)
+        cv2.circle(probe, (px, py), int(verdict["hole_radius_px"] * 1.15), 255, -1)
+        outside_fraction = cv2.countNonZero(cv2.bitwise_and(probe, cv2.bitwise_not(inside))) / max(cv2.countNonZero(probe), 1)
+        if outside_fraction > 0.35:
+            continue
+        found.append({
+            "type": "BARRENO",
+            "x_px": cx,
+            "y_px": cy,
+            "radius_px": float(verdict["hole_radius_px"]),
+            "response": float(verdict["contrast"]),
+            "material": MATERIAL_BY_TYPE["BARRENO"],
+            "saturation": 0.0,
+            "circularity": 1.0,
+            "radius_reliable": bool(verdict["edge_consistency"] >= 0.7),
+        })
+    return found
+
+
+# ============================================================
 # CONTORNO
 # ============================================================
 
@@ -262,6 +327,11 @@ def analyze_reference(
         f for f in raw_features
         if inside[min(height - 1, int(f["y_px"])), min(width - 1, int(f["x_px"]))] > 0
     ]
+    # Los huecos grandes dentro de la pieza (el GrabCut los deja fuera del contorno
+    # exterior, asi que la mascara "inside" sigue siendo la silueta exterior).
+    filled = np.zeros((height, width), np.uint8)
+    cv2.fillPoly(filled, [contour.astype(np.int32)], 255)
+    raw_features += detect_large_holes(image, filled, raw_features)
 
     rect = cv2.minAreaRect(contour)
     long_px = max(rect[1])

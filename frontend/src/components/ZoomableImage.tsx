@@ -62,6 +62,9 @@ const ZoomableImage = forwardRef<ZoomableImageHandle, ZoomableImageProps>(functi
   const [pinned, setPinned] = useState<string | number | null>(null);
   const [dragging, setDragging] = useState(false);
 
+  const tooltipRef = useRef<HTMLDivElement>(null);
+  const [tooltipHeight, setTooltipHeight] = useState(160);
+
   const viewRef = useRef(view);
   viewRef.current = view;
   const pointers = useRef(new Map<number, { x: number; y: number }>());
@@ -214,18 +217,27 @@ const ZoomableImage = forwardRef<ZoomableImageHandle, ZoomableImageProps>(functi
   const activeMarker = activeKey === null ? undefined : markers.find((item) => item.key === activeKey);
   const tooltip = activeMarker && renderTooltip ? renderTooltip(activeMarker.key, pinned !== null) : null;
 
+  // La altura real del tooltip se mide tras pintarlo para que quepa siempre dentro del recuadro.
+  useLayoutEffect(() => {
+    const height = tooltipRef.current?.offsetHeight;
+    if (height && height !== tooltipHeight) setTooltipHeight(height);
+  });
+
   let tooltipStyle: React.CSSProperties | undefined;
   if (activeMarker && tooltip) {
     const sx = view.tx + activeMarker.x * view.s;
     const top = view.ty + (activeMarker.y - activeMarker.r) * view.s;
     const bottom = view.ty + (activeMarker.y + activeMarker.r) * view.s;
-    const below = top < box.height * 0.45;
+    const spaceBelow = box.height - bottom - 10;
+    const spaceAbove = top - 10;
+    const below = spaceBelow >= tooltipHeight || spaceBelow >= spaceAbove;
+    const wanted = below ? bottom + 10 : top - 10 - tooltipHeight;
     const left = Math.min(Math.max(sx, TOOLTIP_WIDTH / 2 + 8), box.width - TOOLTIP_WIDTH / 2 - 8);
     tooltipStyle = {
       left,
-      top: below ? bottom + 10 : top - 10,
+      top: Math.max(8, Math.min(wanted, box.height - tooltipHeight - 8)),
       width: TOOLTIP_WIDTH,
-      transform: below ? "translateX(-50%)" : "translate(-50%, -100%)",
+      transform: "translateX(-50%)",
     };
   }
 
@@ -315,6 +327,7 @@ const ZoomableImage = forwardRef<ZoomableImageHandle, ZoomableImageProps>(functi
 
       {tooltip && tooltipStyle && (
         <div
+          ref={tooltipRef}
           className={`absolute z-20 rounded-xl border border-zinc-700 bg-zinc-950/95 p-3 text-xs text-zinc-200 shadow-2xl backdrop-blur ${
             pinned !== null ? "" : "pointer-events-none"
           }`}

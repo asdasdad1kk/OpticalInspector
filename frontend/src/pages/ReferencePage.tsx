@@ -243,7 +243,7 @@ export default function ReferencePage() {
   function setFeatureType(id: number, type: string) {
     updateFeature(id, {
       type,
-      material: type === "INSERTO" ? "ACERO" : type === "INSERTO_LATON" ? "LATON" : "DELRON",
+      material: type === "INSERTO" ? "ACERO" : type === "INSERTO_LATON" ? "LATON" : type === "BARRENO" ? "BARRENO" : "DELRON",
     });
   }
 
@@ -266,7 +266,7 @@ export default function ReferencePage() {
           <div className="space-y-2 border-t border-zinc-800 pt-2">
             <div>
               <p className="mb-1 text-[10px] font-medium uppercase tracking-wide text-zinc-500">Tipo</p>
-              <div className="grid grid-cols-3 gap-1">
+              <div className="grid grid-cols-2 gap-1">
                 {EDITABLE_TYPES.map((type) => (
                   <button
                     key={type}
@@ -561,15 +561,13 @@ export default function ReferencePage() {
                       <span className="w-6 font-semibold text-zinc-400">{item.id}</span>
                       <select
                         value={item.type}
-                        onChange={(event) => {
-                          const type = event.target.value;
-                          updateFeature(item.id, { type, material: type === "INSERTO" ? "ACERO" : type === "INSERTO_LATON" ? "LATON" : "DELRON" });
-                        }}
+                        onChange={(event) => setFeatureType(item.id, event.target.value)}
                         className="flex-1 rounded border border-zinc-700 bg-zinc-900 px-1.5 py-1"
                       >
                         <option value="INSERTO">Inserto</option>
                         <option value="DELRON_CONICO">Delron cónico</option>
                         <option value="DELRON_PLANO">Delron plano</option>
+                        <option value="BARRENO">Barreno</option>
                         {item.type === "INSERTO_LATON" && <option value="INSERTO_LATON">Inserto (latón)</option>}
                       </select>
                       <button

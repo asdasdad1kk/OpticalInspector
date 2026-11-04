@@ -17,6 +17,11 @@ export const FEATURE_TYPES: Record<string, { label: string; description: string;
     description: "Disco beige ancho y uniforme, sin cono.",
     color: "#22c55e",
   },
+  BARRENO: {
+    label: "Barreno",
+    description: "Hueco liso, sin inserto ni delron. Incluye el hueco grande del centro.",
+    color: "#22d3ee",
+  },
   INSERTO_LATON: {
     label: "Inserto (latón)",
     description: "Tipo anterior; vuelva a dar de alta la pieza para clasificarlo como inserto o delron.",
@@ -40,7 +45,7 @@ export const FEATURE_TYPES: Record<string, { label: string; description: string;
 };
 
 /** Tipos que se pueden asignar a mano a un feature. */
-export const EDITABLE_TYPES = ["INSERTO", "DELRON_CONICO", "DELRON_PLANO"] as const;
+export const EDITABLE_TYPES = ["INSERTO", "DELRON_CONICO", "DELRON_PLANO", "BARRENO"] as const;
 
 export function typeLabel(type?: string | null) {
   if (!type) return "Desconocido";

@@ -176,6 +176,58 @@ def locate_center(
     return best[0], best[1], presence
 
 
+def locate_large_hole(
+    gray: np.ndarray, cx: float, cy: float, radius_px: float, search_px: float
+) -> tuple[float, float, float, float] | None:
+    """Centro y radio de un hueco grande por ajuste de circulo a su borde.
+
+    El LoG local no sirve aqui: el interior es suave y el maximo se desplaza.
+    Devuelve (x, y, presencia 0-1, radio) o None. La presencia es la fraccion
+    de direcciones cuyo borde cae sobre el circulo ajustado.
+    """
+    sigma = max(1.5, 0.03 * radius_px)
+    blurred = cv2.GaussianBlur(gray, (0, 0), sigma).astype(np.float32)
+    height, width = gray.shape[:2]
+    angles = np.linspace(0, 2 * math.pi, 90, endpoint=False)
+    center = np.array([cx, cy], dtype=np.float64)
+    radius = float(radius_px)
+    inliers_fraction = 0.0
+    for _ in range(4):
+        radii = np.arange(0.6 * radius, 1.5 * radius, max(0.5, radius / 120.0))
+        points = []
+        for angle in angles:
+            xs = center[0] + radii * math.cos(angle)
+            ys = center[1] + radii * math.sin(angle)
+            valid = (xs >= 0) & (xs < width - 1) & (ys >= 0) & (ys < height - 1)
+            if valid.sum() < 8:
+                continue
+            profile = cv2.remap(
+                blurred, xs[valid].astype(np.float32).reshape(1, -1),
+                ys[valid].astype(np.float32).reshape(1, -1), cv2.INTER_LINEAR,
+            ).ravel()
+            index = int(np.argmax(np.abs(np.gradient(profile))))
+            points.append((xs[valid][index], ys[valid][index]))
+        if len(points) < 24:
+            return None
+        pts = np.array(points, dtype=np.float64)
+        keep = np.ones(len(pts), dtype=bool)
+        for _ in range(3):
+            a = np.c_[2 * pts[keep, 0], 2 * pts[keep, 1], np.ones(keep.sum())]
+            b = (pts[keep] ** 2).sum(axis=1)
+            solution, *_ = np.linalg.lstsq(a, b, rcond=None)
+            fit_center = solution[:2]
+            fit_radius = math.sqrt(max(solution[2] + fit_center @ fit_center, 1e-9))
+            residual = np.abs(np.hypot(*(pts - fit_center).T) - fit_radius)
+            keep = residual < max(2.0, 0.04 * fit_radius)
+            if keep.sum() < 16:
+                return None
+        center, radius = fit_center, fit_radius
+        inliers_fraction = float(keep.sum()) / len(angles)
+    if math.hypot(center[0] - cx, center[1] - cy) > search_px or abs(radius / radius_px - 1.0) > 0.5:
+        return None
+    return float(center[0]), float(center[1]), float(np.clip(inliers_fraction, 0.0, 1.0)), float(radius)
+
+
 def measure_radius(
     gray: np.ndarray, cx: float, cy: float, expected_radius_px: float
 ) -> tuple[float | None, float]:
@@ -237,12 +289,24 @@ def classify_color(
 
 
 # Tipos que el clasificador de forma sabe distinguir.
-FEATURE_TYPES = ("INSERTO", "DELRON_CONICO", "DELRON_PLANO")
+FEATURE_TYPES = ("INSERTO", "DELRON_CONICO", "DELRON_PLANO", "BARRENO")
 # Delron conico: la cara inclinada del cono se ve saturada (dorada) junto al
 # agujero y pierde saturacion hacia el borde. Se evalua Sin + (Sin - Sout).
 CONE_SCORE_MIN = 54.0
 # Inserto: disco gris claramente mas oscuro que la placa alrededor.
 INSERT_DISK_RATIO_MAX = 0.79
+# Barreno liso: hueco sin disco; fuera del borde del hueco ya no hay otro borde.
+# Se mide el mayor gradiente entre 1.5 y 3.6 radios, relativo al borde del hueco
+# (barrenos 0.01-0.02, delron plano >= 0.12, inserto >= 0.35).
+BARRENO_RING_MAX = 0.07
+# Un hueco real es casi negro (interior/placa ~0.2); si el interior es gris medio
+# el borde medido es el de un disco, no el de un hueco.
+INSERT_INTERIOR_RATIO_MIN = 0.45
+# Centro / placa maximo para aceptar un hueco (reales <= 0.4; manchas >= 0.69).
+CENTER_DARK_MAX = 0.55
+# Un barreno de este radio (px del canvas) o mayor es un hueco grande: no es
+# oscuro (se ve el fondo a traves) y se verifica por su borde, no por el centro.
+LARGE_HOLE_MIN_PX = 45.0
 
 
 def _radial_profile(channel: np.ndarray, cx: float, cy: float, radii: np.ndarray) -> np.ndarray:
@@ -257,6 +321,19 @@ def _radial_profile(channel: np.ndarray, cx: float, cy: float, radii: np.ndarray
 def classify_feature_type(
     gray: np.ndarray, hsv: np.ndarray, cx: float, cy: float, radius_px: float
 ) -> dict[str, Any] | None:
+    """Clasifica el feature; si el radio inicial se aleja del medido, repite
+    la medicion con el radio medido (la resolucion del perfil depende de el)."""
+    result = _classify_feature_type_once(gray, hsv, cx, cy, radius_px)
+    if result is not None and abs(result["hole_radius_px"] / max(radius_px, 1e-6) - 1.0) > 0.25:
+        refined = _classify_feature_type_once(gray, hsv, cx, cy, result["hole_radius_px"])
+        if refined is not None:
+            return refined
+    return result
+
+
+def _classify_feature_type_once(
+    gray: np.ndarray, hsv: np.ndarray, cx: float, cy: float, radius_px: float
+) -> dict[str, Any] | None:
     """INSERTO / DELRON_CONICO / DELRON_PLANO por el perfil radial.
 
     - Inserto: disco gris (con pestañas) mas oscuro que la placa, sin color.
@@ -266,7 +343,7 @@ def classify_feature_type(
     Todo se mide en multiplos del radio del agujero: no depende de la escala.
     Devuelve None si el centro no es un agujero oscuro (reflejo, mancha).
     """
-    rmax = max(30.0, 8.0 * radius_px)
+    rmax = max(40.0, 10.0 * radius_px)
     step = rmax / 240.0
     radii = np.arange(0.0, rmax, step)
     gray_f = gray.astype(np.float32) if gray.dtype != np.float32 else gray
@@ -276,17 +353,23 @@ def classify_feature_type(
 
     # Borde del agujero: primera subida significativa del perfil; el radio es
     # el punto medio de esa subida (estable aunque el borde sea una rampa).
-    k = max(1, int(round(0.6 / step)))
+    # Ventana de suavizado proporcional al feature (no a los pixeles): asi el
+    # resultado no cambia al reescalar la imagen al canvas de inspeccion.
+    k = max(1, int(round(0.15 * radius_px / step)))
     smooth = np.convolve(np.pad(brightness, k, mode="edge"), np.ones(k) / k, mode="same")[k:-k]
     gradient = np.gradient(smooth, radii)
-    half = len(radii) // 2
+    # El borde del hueco se busca cerca del radio esperado: mas lejos hay bordes
+    # ajenos (orilla de la placa, etiquetas) que no deben dominar la medicion.
+    half = int(min(len(radii) // 2, np.searchsorted(radii, 2.5 * radius_px) + 1))
+    if half < 4:
+        return None
     peak = float(gradient[:half].max())
     if peak <= 0:
         return None
     rise = None
     for index in range(1, half - 1):
         if (
-            gradient[index] >= 0.4 * peak
+            gradient[index] >= 0.25 * peak
             and gradient[index] >= gradient[index - 1]
             and gradient[index] >= gradient[index + 1]
         ):
@@ -294,8 +377,10 @@ def classify_feature_type(
             break
     if rise is None:
         return None
+    # El borde puede ser un escalon doble (sombra + borde): se sigue mientras la
+    # pendiente siga siendo significativa respecto al borde mas fuerte.
     end = rise
-    while end < half - 1 and gradient[end] >= 0.4 * gradient[rise]:
+    while end < half - 1 and gradient[end] >= 0.2 * peak:
         end += 1
     low = float(smooth[:rise + 1].min())
     middle = (low + float(smooth[end])) / 2.0
@@ -308,29 +393,98 @@ def classify_feature_type(
         mask = (radii >= low * hole) & (radii <= high * hole)
         return float(np.median(profile[mask])) if mask.any() else float("nan")
 
+    interior = band(brightness, 0.35, 0.85)
     center = band(brightness, 0.0, 0.4)
     disk = band(brightness, 1.6, 2.4)
     plate = band(brightness, 4.5, 6.0)
     sat_in = band(saturation, 1.15, 1.45)
     sat_out = band(saturation, 2.0, 2.4)
-    if not all(np.isfinite([center, disk, plate, sat_in, sat_out])):
+    if not all(np.isfinite([interior, center, disk, plate, sat_in, sat_out])):
         return None
-    if center > 0.6 * disk:
-        return None
+    if center > 0.85 * disk or center > CENTER_DARK_MAX * plate:
+        return None  # el centro de un hueco es claramente mas oscuro que la placa
+
+    # Borde mas fuerte dentro del hueco vs. borde mas fuerte del entorno cercano.
+    fine = np.arange(0.0, 4.0 * hole + 1.0, max(hole / 40.0, 0.25))
+    fine_profile = _radial_profile(gray_f, cx, cy, fine)
+    smooth_fine = np.convolve(np.pad(fine_profile, 2, mode="edge"), np.ones(5) / 5, mode="same")[2:-2]
+    fine_gradient = np.abs(np.gradient(smooth_fine, fine))
+    inner_peak = float(fine_gradient[fine <= 1.3 * hole].max())
+    outer = fine_gradient[(fine >= 1.5 * hole) & (fine <= 3.6 * hole)]
+    ring_ratio = float(outer.max() / inner_peak) if len(outer) and inner_peak > 0 else 0.0
 
     cone_score = sat_in + (sat_in - sat_out)
     disk_ratio = disk / max(plate, 1.0)
+    interior_ratio = interior / max(plate, 1.0)
     if cone_score >= CONE_SCORE_MIN:
         observed = "DELRON_CONICO"
+    elif interior_ratio >= INSERT_INTERIOR_RATIO_MIN:
+        # Interior gris medio (no negro): el "hueco" medido es el borde de un
+        # disco metalico con un punto oscuro central, es decir un inserto.
+        observed = "INSERTO"
+    elif ring_ratio <= BARRENO_RING_MAX and disk_ratio > INSERT_DISK_RATIO_MAX:
+        observed = "BARRENO"
     elif disk_ratio <= INSERT_DISK_RATIO_MAX:
         observed = "INSERTO"
     else:
         observed = "DELRON_PLANO"
+    if observed in ("DELRON_PLANO", "INSERTO") and interior_ratio < 0.3:
+        # Interior casi negro y "anillo" fuerte: puede que el borde medido fuera
+        # un escalon (sombra) dentro del mismo hueco. Se busca donde el perfil
+        # supera la mitad del nivel del entorno inmediato y se vuelve a medir.
+        near = (fine >= 1.2 * hole) & (fine <= 2.2 * hole)
+        level = float(smooth_fine[near].max()) if near.any() else 0.0
+        crossing = np.nonzero(smooth_fine >= 0.5 * level)[0]
+        wide = float(fine[crossing[0]]) if len(crossing) else hole
+        if hole * 1.05 < wide <= 1.8 * hole:
+            wide_peak = float(fine_gradient[fine <= 1.3 * wide].max())
+            wide_outer = fine_gradient[(fine >= 1.5 * wide) & (fine <= 3.6 * wide)]
+            wide_ratio = float(wide_outer.max() / wide_peak) if len(wide_outer) and wide_peak > 0 else 1.0
+            if wide_ratio <= BARRENO_RING_MAX:
+                observed, hole, ring_ratio = "BARRENO", wide, wide_ratio
     return {
         "observed_type": observed,
         "hole_radius_px": round(hole, 2),
         "cone_score": round(cone_score, 1),
         "disk_ratio": round(disk_ratio, 3),
+        "ring_ratio": round(ring_ratio, 3),
+        "interior_ratio": round(interior_ratio, 3),
+    }
+
+
+def classify_large_hole(
+    gray: np.ndarray, hsv: np.ndarray, cx: float, cy: float, radius_px: float
+) -> dict[str, Any] | None:
+    """Verifica un hueco grande (se ve el fondo a traves): borde circular continuo
+    y interior distinto del metal. Devuelve None si no hay tal hueco."""
+    radii = np.arange(0.0, 1.6 * radius_px, max(radius_px / 60.0, 0.5))
+    gray_f = gray.astype(np.float32) if gray.dtype != np.float32 else gray
+    brightness = _radial_profile(gray_f, cx, cy, radii)
+    saturation = _radial_profile(hsv[:, :, 1].astype(np.float32), cx, cy, radii)
+
+    measured, consistency = measure_radius(gray, cx, cy, radius_px)
+    if measured is None or consistency < 0.5 or abs(measured / radius_px - 1.0) > 0.35:
+        return None
+
+    def band(profile: np.ndarray, low: float, high: float) -> float:
+        mask = (radii >= low * measured) & (radii <= high * measured)
+        return float(np.median(profile[mask])) if mask.any() else float("nan")
+
+    inside = band(brightness, 0.0, 0.8)
+    outside = band(brightness, 1.15, 1.5)
+    sat_in = band(saturation, 0.0, 0.8)
+    sat_out = band(saturation, 1.15, 1.5)
+    if not all(np.isfinite([inside, outside, sat_in, sat_out])):
+        return None
+    contrast = abs(inside - outside) / max(outside, 1.0)
+    sat_shift = abs(sat_in - sat_out)
+    if contrast < 0.12 and sat_shift < 25.0:
+        return None  # interior igual al metal: no es un hueco
+    return {
+        "observed_type": "BARRENO",
+        "hole_radius_px": round(measured, 2),
+        "contrast": round(contrast, 3),
+        "edge_consistency": round(consistency, 2),
     }
 
 
@@ -351,7 +505,14 @@ def evaluate_feature(
     radius_px = max(4.0, float(item["radius"]) * scale)
     search_px = radius_px * 1.6
 
-    located = locate_center(gray, expected_x, expected_y, radius_px, search_px)
+    large_hole = item["type"] == "BARRENO" and radius_px >= LARGE_HOLE_MIN_PX
+    fitted_radius: float | None = None
+    if large_hole:
+        fit = locate_large_hole(gray, expected_x, expected_y, radius_px, search_px)
+        located = None if fit is None else fit[:3]
+        fitted_radius = None if fit is None else fit[3]
+    else:
+        located = locate_center(gray, expected_x, expected_y, radius_px, search_px)
     reasons: list[str] = []
     checks: dict[str, str] = {}
 
@@ -409,7 +570,9 @@ def evaluate_feature(
     )
     expected_brass = item["type"] in TYPE_BRASS or item.get("material") == "LATON"
     shape = None
-    if item["type"] in FEATURE_TYPES:
+    if large_hole:
+        shape = classify_large_hole(gray, hsv, found_x, found_y, fitted_radius or radius_px)
+    elif item["type"] in FEATURE_TYPES:
         shape = classify_feature_type(gray, hsv, found_x, found_y, radius_px)
     if options["check_type"] and shape is not None:
         if shape["observed_type"] == item["type"]:
@@ -441,7 +604,10 @@ def evaluate_feature(
             )
             score_parts.append(0.0)
 
-    measured_radius, consistency = measure_radius(gray, found_x, found_y, radius_px)
+    if fitted_radius is not None:
+        measured_radius, consistency = fitted_radius, presence
+    else:
+        measured_radius, consistency = measure_radius(gray, found_x, found_y, radius_px)
     radius_ratio: float | None = None
     if measured_radius is not None:
         radius_ratio = measured_radius / radius_px
