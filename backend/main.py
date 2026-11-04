@@ -26,6 +26,7 @@ from modules.camera.router import router as camera_router
 from modules.camera.service import camera_service
 from modules.database.router import router as database_router
 from modules.inspect.router import router as inspect_router
+from modules.reference.router import router as reference_router
 from modules.upload.router import router as upload_router
 import os
 import sys
@@ -144,6 +145,11 @@ app.include_router(
 
 app.include_router(
     inspect_router,
+    prefix="/api",
+)
+
+app.include_router(
+    reference_router,
     prefix="/api",
 )
 

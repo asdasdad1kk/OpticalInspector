@@ -20,6 +20,8 @@ class CameraStartRequest(BaseModel):
     height: int = Field(default=720, gt=0)
     fps: int = Field(default=30, gt=0, le=60)
     preview_quality: int = Field(default=75, ge=30, le=95)
+    provider: str | None = Field(default=None, description="realsense | brio")
+    device_index: int | None = Field(default=None, ge=0)
 
 
 @router.post("/start")
@@ -30,6 +32,8 @@ def start_camera(data: CameraStartRequest) -> dict:
             height=data.height,
             fps=data.fps,
             preview_quality=data.preview_quality,
+            provider=data.provider,
+            device_index=data.device_index,
         )
         return {
             "message": "Cámara iniciada correctamente.",
@@ -47,6 +51,8 @@ def restart_camera(data: CameraStartRequest) -> dict:
             height=data.height,
             fps=data.fps,
             preview_quality=data.preview_quality,
+            provider=data.provider,
+            device_index=data.device_index,
         )
         return {
             "message": "Cámara reiniciada correctamente.",
@@ -54,6 +60,26 @@ def restart_camera(data: CameraStartRequest) -> dict:
         }
     except (ValueError, RuntimeError) as error:
         raise HTTPException(status_code=500, detail=str(error)) from error
+
+
+@router.get("/devices")
+def list_camera_devices() -> dict:
+    current = camera_service.status
+    if current["running"]:
+        # No se reabre un dispositivo en uso: se informa el activo.
+        return {
+            "providers": ["realsense", "brio"],
+            "devices": [{
+                "provider": current["provider"],
+                "index": current["device_index"],
+                "name": current["device_name"] or current["provider"],
+                "serial": current["serial_number"],
+            }],
+        }
+    return {
+        "providers": ["realsense", "brio"],
+        "devices": camera_service.list_devices(),
+    }
 
 
 @router.post("/stop")

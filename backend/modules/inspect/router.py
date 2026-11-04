@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Response, UploadFile, status
 from pydantic import BaseModel
 from sqlmodel import Session, select
@@ -8,6 +10,19 @@ from modules.camera.service import camera_service
 from models import Inspection,Part,Drawing
 from core.db import get_session
 from .service import InspectService
+
+
+def parse_options(raw: str | None) -> dict | None:
+    """Opciones de inspeccion (features activos, tolerancias) como JSON."""
+    if not raw:
+        return None
+    try:
+        value = json.loads(raw)
+    except json.JSONDecodeError as error:
+        raise HTTPException(status_code=422, detail=f"options no es JSON valido: {error}") from error
+    if not isinstance(value, dict):
+        raise HTTPException(status_code=422, detail="options debe ser un objeto JSON.")
+    return value
 
 
 router = APIRouter(
@@ -37,6 +52,7 @@ class InspectionResponse(BaseModel):
 async def inspect_panel(
     part_no: str = Form(...),
     inspector: str = Form(...),
+    options: str | None = Form(default=None),
     photo: UploadFile = File(...),
     session: Session = Depends(get_session),
 ) -> InspectionResponse:
@@ -59,6 +75,7 @@ async def inspect_panel(
         drawing_id=drawing_id,
         inspector=inspector,
         photo=photo,
+        options=parse_options(options),
     )
 
     result_data = inspection.results or {}
@@ -89,6 +106,7 @@ async def inspect_panel(
 async def inspect_capture(
     part_no: str = Form(...),
     inspector: str = Form(...),
+    options: str | None = Form(default=None),
     session: Session = Depends(get_session),
 ) -> InspectionResponse:
     """
@@ -161,6 +179,7 @@ async def inspect_capture(
             InspectService.process_inspection(
                 drawing=drawing,
                 photo_bytes=photo_bytes,
+                options=parse_options(options),
             )
         )
 

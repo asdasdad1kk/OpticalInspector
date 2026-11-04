@@ -1,6 +1,17 @@
 export type Status = "OK" | "REVISAR" | "FALLO" | "pending";
 
+export type CameraProvider = "realsense" | "brio";
+
+export interface CameraDevice {
+  provider: CameraProvider;
+  index: number;
+  name: string;
+  serial?: string | null;
+}
+
 export interface CameraStatus {
+  provider?: CameraProvider;
+  device_index?: number;
   message?: string;
   running: boolean;
   frame_available: boolean;
@@ -111,4 +122,44 @@ export interface InspectionRecord {
 export interface DatabaseResponse<T> {
   items: T[];
   total: number;
+}
+
+export interface InspectionOptions {
+  check_position?: boolean;
+  check_type?: boolean;
+  check_diameter?: boolean;
+  check_edges?: boolean;
+  dimension_tolerance_pct?: number;
+  distance_tolerance_pct?: number;
+  categories?: Partial<ReferenceCategories>;
+}
+
+export interface ReferenceFeature {
+  id: number;
+  type: string;
+  material: "LATON" | "ACERO";
+  x: number;
+  y: number;
+  radius: number;
+  enabled: boolean;
+  radius_reliable?: boolean;
+}
+
+export interface ReferenceCategories {
+  features: boolean;
+  contour: boolean;
+  distances: boolean;
+  label: boolean;
+}
+
+export interface ReferenceAnalysis {
+  features: ReferenceFeature[];
+  contour: [number, number][];
+  bounds: { xmin: number; xmax: number; ymin: number; ymax: number };
+  label: { x: number; y: number; w: number; h: number; angle: number } | null;
+  dimensions: { length: number; width: number; area: number; feature_count: number; unit: string };
+  scale: number;
+  relative: boolean;
+  enabled: ReferenceCategories;
+  preview_png: string;
 }

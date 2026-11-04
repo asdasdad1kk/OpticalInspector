@@ -3,10 +3,17 @@ from __future__ import annotations
 import threading
 import time
 from dataclasses import dataclass
+from typing import Any
 
 import cv2
 import numpy as np
-import pyrealsense2 as rs
+
+try:  # RealSense es opcional: la BRIO funciona sin pyrealsense2.
+    import pyrealsense2 as rs
+except ImportError:  # pragma: no cover
+    rs = None
+
+PROVIDERS = ("realsense", "brio")
 
 
 @dataclass(frozen=True)
@@ -16,7 +23,7 @@ class CameraFrame:
 
 
 class CameraService:
-    """Control centralizado de una Intel RealSense.
+    """Control centralizado de la camara (Intel RealSense o Logitech BRIO).
 
     Un único hilo captura imágenes. El WebSocket consume una versión JPEG
     ligera, mientras que la inspección obtiene una copia del frame BGR
@@ -24,9 +31,12 @@ class CameraService:
     """
 
     def __init__(self) -> None:
-        self._pipeline: rs.pipeline | None = None
-        self._config: rs.config | None = None
-        self._profile: rs.pipeline_profile | None = None
+        self._provider = "realsense"
+        self._device_index = 0
+        self._capture: cv2.VideoCapture | None = None
+        self._pipeline: Any = None
+        self._config: Any = None
+        self._profile: Any = None
         self._thread: threading.Thread | None = None
 
         self._state_lock = threading.RLock()
@@ -50,9 +60,16 @@ class CameraService:
         height: int = 720,
         fps: int = 30,
         preview_quality: int = 75,
+        provider: str | None = None,
+        device_index: int | None = None,
     ) -> dict:
         if width <= 0 or height <= 0 or fps <= 0:
             raise ValueError("width, height y fps deben ser mayores que cero.")
+
+        if provider is not None:
+            provider = provider.lower()
+            if provider not in PROVIDERS:
+                raise ValueError(f"Proveedor desconocido: {provider}. Use {PROVIDERS}.")
 
         preview_quality = max(30, min(int(preview_quality), 95))
 
@@ -60,6 +77,10 @@ class CameraService:
             if self._running:
                 return self.status
 
+            if provider is not None:
+                self._provider = provider
+            if device_index is not None:
+                self._device_index = max(0, int(device_index))
             self._width = int(width)
             self._height = int(height)
             self._fps = int(fps)
@@ -70,44 +91,110 @@ class CameraService:
             self._sequence = 0
             self._stop_event.clear()
 
-            pipeline = rs.pipeline()
-            config = rs.config()
-            config.enable_stream(
-                rs.stream.color,
-                self._width,
-                self._height,
-                rs.format.bgr8,
-                self._fps,
-            )
+            if self._provider == "brio":
+                self._open_brio()
+            else:
+                self._open_realsense()
 
-            try:
-                profile = pipeline.start(config)
-            except Exception as error:
-                try:
-                    pipeline.stop()
-                except Exception:
-                    pass
-                raise RuntimeError(
-                    f"No fue posible iniciar la Intel RealSense: {error}"
-                ) from error
-
-            self._pipeline = pipeline
-            self._config = config
-            self._profile = profile
             self._running = True
 
             self._thread = threading.Thread(
                 target=self._capture_loop,
-                name="realsense-capture",
+                name=f"{self._provider}-capture",
                 daemon=True,
             )
             self._thread.start()
 
             return self.status
 
+    def _open_realsense(self) -> None:
+        if rs is None:
+            raise RuntimeError("pyrealsense2 no esta instalado en este equipo.")
+
+        pipeline = rs.pipeline()
+        config = rs.config()
+        config.enable_stream(
+            rs.stream.color,
+            self._width,
+            self._height,
+            rs.format.bgr8,
+            self._fps,
+        )
+
+        try:
+            profile = pipeline.start(config)
+        except Exception as error:
+            try:
+                pipeline.stop()
+            except Exception:
+                pass
+            raise RuntimeError(
+                f"No fue posible iniciar la Intel RealSense: {error}"
+            ) from error
+
+        self._pipeline = pipeline
+        self._config = config
+        self._profile = profile
+
+    def _open_brio(self) -> None:
+        # DirectShow + MJPG: la BRIO solo entrega 1080p/4K a 30 fps en MJPG.
+        capture = cv2.VideoCapture(self._device_index, cv2.CAP_DSHOW)
+        if not capture.isOpened():
+            capture.release()
+            raise RuntimeError(
+                f"No fue posible abrir la Logitech BRIO (indice {self._device_index})."
+            )
+
+        capture.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
+        capture.set(cv2.CAP_PROP_FRAME_WIDTH, self._width)
+        capture.set(cv2.CAP_PROP_FRAME_HEIGHT, self._height)
+        capture.set(cv2.CAP_PROP_FPS, self._fps)
+        capture.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+        capture.set(cv2.CAP_PROP_AUTOFOCUS, 1)
+
+        ok, frame = capture.read()
+        if not ok or frame is None:
+            capture.release()
+            raise RuntimeError("La Logitech BRIO se abrio pero no entrega imagen.")
+
+        # La camara puede negociar otra resolucion; se informa la real.
+        self._height, self._width = frame.shape[:2]
+        self._capture = capture
+
+    @staticmethod
+    def list_devices(max_index: int = 6) -> list[dict]:
+        """Dispositivos disponibles. Los indices OpenCV se prueban rapidamente."""
+        devices: list[dict] = []
+
+        if rs is not None:
+            try:
+                for device in rs.context().query_devices():
+                    devices.append({
+                        "provider": "realsense",
+                        "index": len(devices),
+                        "name": device.get_info(rs.camera_info.name),
+                        "serial": device.get_info(rs.camera_info.serial_number),
+                    })
+            except Exception:
+                pass
+
+        for index in range(max_index):
+            capture = cv2.VideoCapture(index, cv2.CAP_DSHOW)
+            try:
+                if capture.isOpened():
+                    devices.append({
+                        "provider": "brio",
+                        "index": index,
+                        "name": f"Camara USB (UVC) #{index}",
+                        "serial": None,
+                    })
+            finally:
+                capture.release()
+        return devices
+
     def stop(self) -> dict:
         with self._state_lock:
-            if not self._running and self._pipeline is None:
+            if not self._running and self._pipeline is None and self._capture is None:
                 return self.status
 
             self._running = False
@@ -115,6 +202,7 @@ class CameraService:
             self._frame_condition.notify_all()
             thread = self._thread
             pipeline = self._pipeline
+            capture = self._capture
 
         # El pipeline se detiene fuera del lock para desbloquear wait_for_frames.
         if pipeline is not None:
@@ -126,7 +214,11 @@ class CameraService:
         if thread is not None and thread.is_alive():
             thread.join(timeout=2.0)
 
+        if capture is not None:
+            capture.release()
+
         with self._state_lock:
+            self._capture = None
             self._pipeline = None
             self._config = None
             self._profile = None
@@ -142,26 +234,35 @@ class CameraService:
         height: int = 720,
         fps: int = 30,
         preview_quality: int = 75,
+        provider: str | None = None,
+        device_index: int | None = None,
     ) -> dict:
         self.stop()
-        return self.start(width, height, fps, preview_quality)
+        return self.start(width, height, fps, preview_quality, provider, device_index)
 
     def _capture_loop(self) -> None:
         while not self._stop_event.is_set():
             with self._state_lock:
                 pipeline = self._pipeline
+                capture = self._capture
 
-            if pipeline is None:
+            if pipeline is None and capture is None:
                 break
 
             try:
-                frames = pipeline.wait_for_frames(timeout_ms=1000)
-                color_frame = frames.get_color_frame()
+                if capture is not None:
+                    ok, frame = capture.read()
+                    if not ok or frame is None:
+                        raise RuntimeError("La BRIO no entrego un frame.")
+                else:
+                    frames = pipeline.wait_for_frames(timeout_ms=1000)
+                    color_frame = frames.get_color_frame()
 
-                if not color_frame:
-                    continue
+                    if not color_frame:
+                        continue
 
-                frame = np.asanyarray(color_frame.get_data())
+                    frame = np.asanyarray(color_frame.get_data())
+
                 if frame is None or frame.size == 0:
                     continue
 
@@ -276,7 +377,9 @@ class CameraService:
             device_name: str | None = None
             serial_number: str | None = None
 
-            if self._profile is not None:
+            if self._capture is not None:
+                device_name = "Logitech BRIO"
+            elif self._profile is not None:
                 try:
                     device = self._profile.get_device()
                     device_name = device.get_info(rs.camera_info.name)
@@ -285,6 +388,8 @@ class CameraService:
                     pass
 
             return {
+                "provider": self._provider,
+                "device_index": self._device_index,
                 "running": self._running,
                 "frame_available": self._latest_frame is not None,
                 "sequence": self._sequence,

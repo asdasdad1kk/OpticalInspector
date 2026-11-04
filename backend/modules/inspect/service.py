@@ -14,6 +14,8 @@ from sqlmodel import Session
 # Ajusta este import a tu estructura real.
 from models import Drawing, Inspection
 
+from .pipeline import run_pipeline
+
 
 # ============================================================
 # CONFIGURACION
@@ -1320,9 +1322,13 @@ class InspectService:
     def process_inspection(
         drawing: Drawing,
         photo_bytes: bytes,
+        options: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         roi_data = drawing.rois or {}
         rois = roi_data.get("items", [])
+
+        if roi_data.get("source") == "golden":
+            return InspectService._process_golden(roi_data, photo_bytes, options)
 
         if not rois:
             raise ValueError("El drawing no contiene ROIs guardados.")
@@ -1346,107 +1352,47 @@ class InspectService:
             else:
                 xmin, xmax, ymin, ymax = get_dxf_bounds(modelspace)
 
-            cad_width = xmax - xmin
-            cad_height = ymax - ymin
-            if cad_width <= 0 or cad_height <= 0:
+            if xmax - xmin <= 0 or ymax - ymin <= 0:
                 raise ValueError("Las dimensiones CAD no son validas.")
 
-            expected_aspect = cad_width / cad_height
-            rectified_height = int(round(RECTIFIED_WIDTH / expected_aspect))
+            items = [
+                {
+                    "id": roi["id"],
+                    "type": roi["type"],
+                    "x": float(roi["center_x_mm"]),
+                    "y": float(roi["center_y_mm"]),
+                    "radius": max(float(roi["outer_radius_mm"]), 0.05),
+                    "radii": [float(r) for r in roi.get("circle_radii_mm", [])],
+                    # El radio CAD incluye el entorno: el color se toma del centro.
+                    "color_reach": 0.55,
+                }
+                for roi in rois
+            ]
 
-            corners, panel_debug, _ = detect_panel_corners(image, expected_aspect)
-            rectified, _ = rectify_panel(
-                image,
-                corners,
-                RECTIFIED_WIDTH,
-                rectified_height,
-            )
-            cad_template = draw_dxf_template(
-                modelspace,
-                xmin,
-                xmax,
-                ymin,
-                ymax,
-                RECTIFIED_WIDTH,
-                rectified_height,
-            )
-
-            refinement = np.eye(3, dtype=np.float64)
-            refinement_method = "IDENTIDAD"
-            refinement_inliers = 0
-            alignment_matches: list[dict[str, Any]] = []
-            alignment_debug = rectified.copy()
-
-            if REFINE_ALIGNMENT_WITH_INSERTS:
-                (
-                    expected_points,
-                    detected_points,
-                    alignment_matches,
-                    alignment_debug,
-                ) = collect_alignment_points(
-                    rectified,
-                    rois,
-                    xmin,
-                    xmax,
-                    ymin,
-                    ymax,
-                    RECTIFIED_WIDTH,
-                    rectified_height,
+            def build_template(canvas: dict[str, Any]) -> np.ndarray:
+                c_xmin, c_xmax, c_ymin, c_ymax = canvas["bounds"]
+                return draw_dxf_template(
+                    modelspace, c_xmin, c_xmax, c_ymin, c_ymax,
+                    canvas["width"], canvas["height"],
                 )
-                candidate, method, inliers = calculate_insert_refinement(
-                    expected_points,
-                    detected_points,
-                )
-                if validate_refinement_matrix(
-                    candidate,
-                    RECTIFIED_WIDTH,
-                    rectified_height,
-                ):
-                    refinement = candidate
-                    refinement_method = method
-                    refinement_inliers = inliers
 
-            cad_template_refined = cv2.warpPerspective(
-                cad_template,
-                refinement,
-                (RECTIFIED_WIDTH, rectified_height),
-                flags=cv2.INTER_NEAREST,
-                borderMode=cv2.BORDER_CONSTANT,
-                borderValue=0,
+            run = run_pipeline(
+                image, items, (xmin, xmax, ymin, ymax), options, build_template,
             )
-            _, real_edges = create_real_edge_image(rectified)
-            result_image, results = inspect_rois(
-                rectified,
-                real_edges,
-                cad_template_refined,
-                rois,
-                xmin,
-                xmax,
-                ymin,
-                ymax,
-                refinement,
-                RECTIFIED_WIDTH,
-                rectified_height,
-            )
-            overlay = create_overlay(rectified, cad_template_refined)
-            overall_score, overall_status, summary = calculate_overall_result(results)
 
             return {
-                "rectified_image": encode_png(rectified),
-                "overlay_image": encode_png(result_image),
-                "cad_overlay_image": encode_png(overlay),
-                "panel_debug_image": encode_png(panel_debug),
-                "alignment_debug_image": encode_png(alignment_debug),
-                "score": overall_score,
-                "status": overall_status,
+                "rectified_image": encode_png(run["rectified"]),
+                "overlay_image": encode_png(run["result_image"]),
+                "cad_overlay_image": encode_png(run["overlay"]),
+                "panel_debug_image": encode_png(run["debug"]),
+                "alignment_debug_image": encode_png(run["debug"]),
+                "score": run["score"],
+                "status": run["status"],
                 "results": {
-                    "items": results,
-                    "summary": summary,
-                    "alignment": {
-                        "method": refinement_method,
-                        "inliers": refinement_inliers,
-                        "matches": alignment_matches,
-                    },
+                    "items": run["results"],
+                    "summary": run["summary"],
+                    "alignment": run["alignment"],
+                    "options": run["options"],
                     "bounds": {
                         "xmin": xmin,
                         "xmax": xmax,
@@ -1462,11 +1408,64 @@ class InspectService:
                 os.remove(temporary_path)
 
     @staticmethod
+    def _process_golden(
+        roi_data: dict[str, Any],
+        photo_bytes: bytes,
+        options: dict[str, Any] | None,
+    ) -> dict[str, Any]:
+        """Comparacion contra una pieza patron real (sin DXF)."""
+        golden = dict(roi_data.get("golden") or {})
+        # Categorias activas elegidas al inspeccionar (contorno, etiqueta, ...).
+        categories = (options or {}).get("categories")
+        if isinstance(categories, dict):
+            golden["enabled"] = {**(golden.get("enabled") or {}), **categories}
+        bounds = roi_data["bounds"]
+        image = decode_image(photo_bytes)
+        items = [
+            {
+                "id": item["id"],
+                "type": item["type"],
+                "x": float(item["x"]),
+                "y": float(item["y"]),
+                "radius": max(float(item["radius"]), 0.05),
+                "material": item.get("material"),
+                "enabled": item.get("enabled", True),
+            }
+            for item in roi_data.get("items", [])
+        ]
+        run = run_pipeline(
+            image,
+            items,
+            (bounds["xmin"], bounds["xmax"], bounds["ymin"], bounds["ymax"]),
+            options,
+            None,
+            golden,
+        )
+        return {
+            "rectified_image": encode_png(run["rectified"]),
+            "overlay_image": encode_png(run["result_image"]),
+            "cad_overlay_image": encode_png(run["overlay"]),
+            "panel_debug_image": encode_png(run["debug"]),
+            "alignment_debug_image": encode_png(run["debug"]),
+            "score": run["score"],
+            "status": run["status"],
+            "results": {
+                "items": run["results"],
+                "summary": run["summary"],
+                "alignment": run["alignment"],
+                "options": run["options"],
+                "source": "golden",
+                "bounds": bounds,
+            },
+        }
+
+    @staticmethod
     async def inspect(
         session: Session,
         drawing_id: int,
         inspector: str,
         photo: UploadFile,
+        options: dict[str, Any] | None = None,
     ) -> Inspection:
         clean_inspector = inspector.strip()
         if not clean_inspector:
@@ -1481,7 +1480,7 @@ class InspectService:
             raise HTTPException(status_code=400, detail="La imagen esta vacia.")
 
         try:
-            processed = InspectService.process_inspection(drawing, photo_bytes)
+            processed = InspectService.process_inspection(drawing, photo_bytes, options)
         except ValueError as error:
             raise HTTPException(status_code=400, detail=str(error)) from error
         except Exception as error:

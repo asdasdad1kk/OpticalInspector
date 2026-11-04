@@ -22,10 +22,12 @@ import {
   inspectPhoto,
   startCamera,
   stopCamera,
+  type CameraStartOptions,
 } from "../lib/api";
 import { useCameraStream } from "../hooks/useCameraStream";
-import type { CameraStatus, InspectionResponse } from "../types/api";
+import type { CameraStatus, InspectionOptions, InspectionResponse } from "../types/api";
 import StatusBadge from "../components/StatusBadge";
+import CameraSelector, { loadCameraOptions } from "../components/CameraSelector";
 
 type InspectionSource = "camera" | "photo";
 type ResultImageType =
@@ -41,6 +43,13 @@ export default function InspectPage() {
   const [photo, setPhoto] = useState<File>();
   const [localPhotoUrl, setLocalPhotoUrl] = useState<string>();
   const [camera, setCamera] = useState<CameraStatus>();
+  const [cameraOptions, setCameraOptions] = useState<CameraStartOptions>(loadCameraOptions);
+  const [inspectionOptions, setInspectionOptions] = useState<InspectionOptions>({
+    check_position: true,
+    check_type: true,
+    check_diameter: true,
+    check_edges: true,
+  });
   const [loadingCamera, setLoadingCamera] = useState(false);
   const [inspecting, setInspecting] = useState(false);
   const [error, setError] = useState<string>();
@@ -68,7 +77,7 @@ export default function InspectPage() {
     try {
       setLoadingCamera(true);
       setError(undefined);
-      setCamera(await startCamera());
+      setCamera(await startCamera(cameraOptions));
     } catch (error) {
       setError(
         error instanceof Error
@@ -183,8 +192,8 @@ export default function InspectPage() {
 
       const response =
         inspectionSource === "camera"
-          ? await inspectCapture(partNo, inspector)
-          : await inspectPhoto(partNo, inspector, photo!);
+          ? await inspectCapture(partNo, inspector, inspectionOptions)
+          : await inspectPhoto(partNo, inspector, photo!, inspectionOptions);
 
       setResult(response);
       setActiveImage("overlay-image");
@@ -223,13 +232,18 @@ export default function InspectPage() {
             Inspección de panel
           </h1>
           <p className="mt-2 max-w-2xl text-sm text-zinc-500">
-            Inspecciona el último frame de la RealSense o selecciona una
+            Inspecciona el último frame de la cámara seleccionada (RealSense o Logitech BRIO) o selecciona una
             fotografía existente para compararla contra el drawing almacenado.
           </p>
         </div>
 
         {inspectionSource === "camera" && (
-          <div className="flex gap-2">
+          <div className="flex flex-wrap items-center gap-2">
+            <CameraSelector
+              value={cameraOptions}
+              onChange={setCameraOptions}
+              disabled={loadingCamera || camera?.running}
+            />
             <button
               type="button"
               onClick={handleStart}
@@ -475,6 +489,56 @@ export default function InspectPage() {
                   />
                 </label>
               )}
+
+              <fieldset className="rounded-lg border border-zinc-800 bg-zinc-950/60 p-3">
+                <legend className="px-1 text-xs font-medium text-zinc-400">
+                  Verificaciones
+                </legend>
+                <div className="grid grid-cols-2 gap-x-3 gap-y-2 text-xs text-zinc-300">
+                  {(
+                    [
+                      ["check_position", "Posición"],
+                      ["check_type", "Tipo / material"],
+                      ["check_diameter", "Diámetro"],
+                      ["check_edges", "Bordes CAD"],
+                    ] as const
+                  ).map(([key, label]) => (
+                    <label key={key} className="flex cursor-pointer items-center gap-2">
+                      <input
+                        type="checkbox"
+                        className="accent-emerald-500"
+                        checked={inspectionOptions[key] ?? true}
+                        onChange={(event) =>
+                          setInspectionOptions((current) => ({ ...current, [key]: event.target.checked }))
+                        }
+                      />
+                      {label}
+                    </label>
+                  ))}
+                  {(
+                    [
+                      ["contour", "Contorno"],
+                      ["distances", "Distancias"],
+                      ["label", "Etiqueta"],
+                    ] as const
+                  ).map(([key, label]) => (
+                    <label key={key} className="flex cursor-pointer items-center gap-2" title="Solo piezas dadas de alta con pieza real">
+                      <input
+                        type="checkbox"
+                        className="accent-emerald-500"
+                        checked={inspectionOptions.categories?.[key] ?? true}
+                        onChange={(event) =>
+                          setInspectionOptions((current) => ({
+                            ...current,
+                            categories: { ...current.categories, [key]: event.target.checked },
+                          }))
+                        }
+                      />
+                      {label}
+                    </label>
+                  ))}
+                </div>
+              </fieldset>
 
               <button
                 type="button"
