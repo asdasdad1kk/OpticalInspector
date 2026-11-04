@@ -266,6 +266,9 @@ def open_application(
     icon: pystray.Icon | None = None,
     item: pystray.MenuItem | None = None,
 ) -> None:
+    if os.getenv("OI_NO_BROWSER"):  # pruebas automatizadas / servicio
+        return
+
     webbrowser.open(
         APP_HOME_URL,
         new=2,
@@ -353,7 +356,7 @@ def is_port_available() -> bool:
         client.settimeout(0.25)
 
         return client.connect_ex(
-            (APP_HOST, APP_PORT)
+            (BROWSER_HOST, APP_PORT)
         ) != 0
 
 
@@ -369,7 +372,7 @@ def wait_for_server() -> None:
             client.settimeout(0.1)
 
             if client.connect_ex(
-                (APP_HOST, APP_PORT)
+                (BROWSER_HOST, APP_PORT)
             ) == 0:
                 open_application()
                 return

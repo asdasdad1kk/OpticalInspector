@@ -14,11 +14,17 @@ from dotenv import load_dotenv
 from sqlalchemy.engine import URL
 
 if getattr(sys, "frozen", False):
-    BASE_DIR = Path(sys.executable).resolve().parent
+    # Instalado: configuracion y datos por usuario, fuera de la carpeta del
+    # programa (asi sobreviven a actualizaciones y no requieren permisos de admin).
+    _local = os.environ.get("LOCALAPPDATA") or str(Path.home() / "AppData" / "Local")
+    BASE_DIR = Path(_local) / "OpticalInspector"
+    BASE_DIR.mkdir(parents=True, exist_ok=True)
+    _DEFAULT_DATA_DIR = BASE_DIR / "data"
 else:
     BASE_DIR = Path(__file__).resolve().parent.parent
+    _DEFAULT_DATA_DIR = BASE_DIR
 
-load_dotenv(BASE_DIR / ".env")
+load_dotenv(BASE_DIR / ".env", encoding="utf-8-sig")
 
 
 def _path(name: str, default: Path) -> Path:
@@ -27,7 +33,7 @@ def _path(name: str, default: Path) -> Path:
     return path if path.is_absolute() or str(path).startswith("\\\\") else BASE_DIR / path
 
 
-DATA_DIR = _path("OI_DATA_DIR", BASE_DIR)
+DATA_DIR = _path("OI_DATA_DIR", _DEFAULT_DATA_DIR)
 DB_PATH = _path("OI_DB_PATH", DATA_DIR / "optical_inspector.db")
 IMAGES_DIR = _path("OI_IMAGES_DIR", DATA_DIR / "storage" / "inspections")
 GOLDEN_DIR = _path("OI_GOLDEN_DIR", DATA_DIR / "storage" / "golden")

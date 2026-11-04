@@ -146,6 +146,16 @@ hiddenimports = [
     "sqlite3",
     "_sqlite3",
 
+    # Configuracion (.env) y modulos de la aplicacion
+    "dotenv",
+    "modules.camera.router",
+    "modules.config.router",
+    "modules.database.router",
+    "modules.inspect.router",
+    "modules.reference.router",
+    "modules.reference.samples",
+    "modules.upload.router",
+
     # Vision
     "cv2",
     "numpy",
@@ -256,6 +266,10 @@ a = Analysis(
 
     excludes=[
         "tkinter",
+        "PyQt5",
+        "PyQt6",
+        "PySide2",
+        "PySide6",
         "matplotlib",
         "pytest",
         "IPython",
@@ -287,11 +301,9 @@ exe = EXE(
 
     a.scripts,
 
-    a.binaries,
-
-    a.datas,
-
     [],
+
+    exclude_binaries=True,
 
     name="OpticalInspector",
 
@@ -302,10 +314,6 @@ exe = EXE(
     strip=False,
 
     upx=False,
-
-    upx_exclude=[],
-
-    runtime_tmpdir=None,
 
     console=False,
 
@@ -318,4 +326,20 @@ exe = EXE(
     codesign_identity=None,
 
     entitlements_file=None,
+
+    icon=str(BACKEND_DIR.parent / "installer" / "app.ico"),
+)
+
+coll = COLLECT(
+    exe,
+
+    a.binaries,
+
+    a.datas,
+
+    strip=False,
+
+    upx=False,
+
+    name="OpticalInspector",
 )
