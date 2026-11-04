@@ -12,3 +12,4 @@ backend/logs/
 # Instalador: artefactos de compilacion
 installer/build/
 installer/Output/
+logs/crash.log

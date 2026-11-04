@@ -37,8 +37,10 @@ export async function startCamera(options: CameraStartOptions = {}): Promise<Cam
   return response.json();
 }
 
-export async function listCameraDevices(): Promise<{ providers: CameraProvider[]; devices: CameraDevice[] }> {
-  const response = await fetch(`${API_URL}/camera/devices`, { cache: "no-store" });
+export async function listCameraDevices(
+  refresh = false,
+): Promise<{ providers: CameraProvider[]; devices: CameraDevice[]; scanned?: boolean; message?: string | null }> {
+  const response = await fetch(`${API_URL}/camera/devices${refresh ? "?refresh=true" : ""}`, { cache: "no-store" });
   if (!response.ok) throw new Error(await parseError(response));
   return response.json();
 }

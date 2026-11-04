@@ -53,6 +53,13 @@ class CameraService:
         self._thread: threading.Thread | None = None
 
         self._state_lock = threading.RLock()
+        # Serializa todo acceso al hardware (sondeo, apertura, liberacion).
+        # DirectShow/OpenCV corrompe el heap si dos hilos abren o liberan
+        # dispositivos a la vez, y eso tumba el proceso sin traza.
+        self._device_lock = threading.Lock()
+        self._devices_cache: list[dict] | None = None
+        # Captura que el hilo de lectura debe liberar al salir (ver stop()).
+        self._orphan_capture: cv2.VideoCapture | None = None
         self._frame_condition = threading.Condition(self._state_lock)
         self._stop_event = threading.Event()
 
@@ -89,6 +96,10 @@ class CameraService:
         with self._state_lock:
             if self._running:
                 return self.status
+            if self._thread is not None and self._thread.is_alive():
+                raise RuntimeError(
+                    "La cámara anterior todavía se está cerrando; intente de nuevo en unos segundos."
+                )
 
             if provider is not None:
                 self._provider = provider
@@ -104,10 +115,11 @@ class CameraService:
             self._sequence = 0
             self._stop_event.clear()
 
-            if self._provider == "brio":
-                self._open_brio()
-            else:
-                self._open_realsense()
+            with self._device_lock:
+                if self._provider == "brio":
+                    self._open_brio()
+                else:
+                    self._open_realsense()
 
             self._running = True
 
@@ -201,9 +213,26 @@ class CameraService:
         self._height, self._width = frame.shape[:2]
         self._capture = capture
 
+    def list_devices(self, refresh: bool = False) -> dict:
+        """Dispositivos disponibles (en cache; `refresh` vuelve a sondear).
+
+        Nunca se sondea con la camara corriendo: abrir el dispositivo activo
+        desde otro hilo es justo lo que corrompe DirectShow.
+        """
+        with self._state_lock:
+            running = self._running
+        if running:
+            message = "Detenga la cámara para buscar otros dispositivos." if refresh else None
+            return {"devices": list(self._devices_cache or []), "scanned": False, "message": message}
+        if self._devices_cache is not None and not refresh:
+            return {"devices": list(self._devices_cache), "scanned": False, "message": None}
+        with self._device_lock:
+            devices = self._probe_devices()
+        self._devices_cache = devices
+        return {"devices": list(devices), "scanned": True, "message": None}
+
     @staticmethod
-    def list_devices(max_index: int = 6) -> list[dict]:
-        """Dispositivos disponibles. Los indices OpenCV se prueban rapidamente."""
+    def _probe_devices(max_index: int = 8) -> list[dict]:
         devices: list[dict] = []
 
         if rs is not None:
@@ -218,18 +247,26 @@ class CameraService:
             except Exception:
                 pass
 
+        misses = 0
         for index in range(max_index):
             capture = cv2.VideoCapture(index, cv2.CAP_DSHOW)
             try:
-                if capture.isOpened():
-                    devices.append({
-                        "provider": "brio",
-                        "index": index,
-                        "name": f"Camara USB (UVC) #{index}",
-                        "serial": None,
-                    })
+                opened = capture.isOpened()
             finally:
                 capture.release()
+            if opened:
+                misses = 0
+                devices.append({
+                    "provider": "brio",
+                    "index": index,
+                    "name": f"Cámara USB #{index}",
+                    "serial": None,
+                })
+            else:
+                # Los indices de DirectShow son consecutivos: dos huecos seguidos = fin.
+                misses += 1
+                if misses >= 2:
+                    break
         return devices
 
     def stop(self) -> dict:
@@ -252,17 +289,25 @@ class CameraService:
                 pass
 
         if thread is not None and thread.is_alive():
-            thread.join(timeout=2.0)
+            thread.join(timeout=5.0)
 
         if capture is not None:
-            capture.release()
+            if thread is not None and thread.is_alive():
+                # El hilo sigue dentro de read(): liberar ahora corromperia el
+                # heap. El propio hilo libera la captura al salir.
+                with self._state_lock:
+                    self._orphan_capture = capture
+            else:
+                with self._device_lock:
+                    capture.release()
 
         with self._state_lock:
             self._capture = None
             self._pipeline = None
             self._config = None
             self._profile = None
-            self._thread = None
+            if thread is None or not thread.is_alive():
+                self._thread = None
             self._latest_frame = None
             self._latest_preview = None
             self._frame_condition.notify_all()
@@ -281,6 +326,8 @@ class CameraService:
         return self.start(width, height, fps, preview_quality, provider, device_index)
 
     def _capture_loop(self) -> None:
+        with self._state_lock:
+            own_capture = self._capture
         while not self._stop_event.is_set():
             with self._state_lock:
                 pipeline = self._pipeline
@@ -341,7 +388,13 @@ class CameraService:
 
         with self._frame_condition:
             self._running = False
+            capture = None
+            if own_capture is not None and self._orphan_capture is own_capture:
+                capture, self._orphan_capture = own_capture, None
             self._frame_condition.notify_all()
+        if capture is not None:
+            with self._device_lock:
+                capture.release()
 
     def wait_for_preview(
         self,

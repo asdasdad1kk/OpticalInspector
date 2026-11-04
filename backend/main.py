@@ -334,7 +334,10 @@ def run_server() -> None:
     port=APP_PORT,
     ws="websockets",
 
-    log_level="critical",
+    # Sin log_config uvicorn no instala sus handlers de consola: sus
+    # errores llegan al log rotativo (en el exe no hay consola).
+    log_config=None,
+    log_level="warning",
     access_log=False,
 
     use_colors=False,

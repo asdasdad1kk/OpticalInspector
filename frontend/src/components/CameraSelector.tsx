@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { LoaderCircle, RefreshCw } from "lucide-react";
 import { listCameraDevices, type CameraStartOptions } from "../lib/api";
 import type { CameraDevice, CameraProvider } from "../types/api";
 
@@ -33,12 +34,35 @@ interface Props {
 
 export default function CameraSelector({ value, onChange, disabled }: Props) {
   const [devices, setDevices] = useState<CameraDevice[]>([]);
+  const [searching, setSearching] = useState(false);
+  const [notice, setNotice] = useState<string>();
 
+  // Al montar solo se lee la lista en cache del backend; el sondeo de
+  // dispositivos (lento) se hace unicamente con el boton "Buscar cámaras".
   useEffect(() => {
     listCameraDevices()
       .then((response) => setDevices(response.devices))
-      .catch(() => setDevices([]));
-  }, [disabled]);
+      .catch(() => undefined);
+  }, []);
+
+  async function searchDevices() {
+    setSearching(true);
+    setNotice(undefined);
+    try {
+      const response = await listCameraDevices(true);
+      setDevices(response.devices);
+      const found = response.devices.filter((device) => device.provider === provider);
+      if (response.message) setNotice(response.message);
+      else if (!found.length) setNotice("No se encontraron cámaras.");
+      if (found.length && !found.some((device) => device.index === (value.deviceIndex ?? 0))) {
+        update({ ...value, deviceIndex: found[0].index });
+      }
+    } catch (caught) {
+      setNotice(caught instanceof Error ? caught.message : "No fue posible buscar cámaras.");
+    } finally {
+      setSearching(false);
+    }
+  }
 
   function update(next: CameraStartOptions) {
     try {
@@ -77,20 +101,38 @@ export default function CameraSelector({ value, onChange, disabled }: Props) {
         ))}
       </select>
 
-      {provider === "brio" && available.length > 1 && (
-        <select
-          aria-label="Dispositivo"
-          className={selectClass}
-          disabled={disabled}
-          value={value.deviceIndex ?? 0}
-          onChange={(event) => update({ ...value, deviceIndex: Number(event.target.value) })}
-        >
-          {available.map((device) => (
-            <option key={device.index} value={device.index}>
-              {device.name}
-            </option>
-          ))}
-        </select>
+      {provider === "brio" && (
+        <>
+          <select
+            aria-label="Dispositivo"
+            className={selectClass}
+            disabled={disabled || searching}
+            value={value.deviceIndex ?? 0}
+            onChange={(event) => update({ ...value, deviceIndex: Number(event.target.value) })}
+          >
+            {!available.some((device) => device.index === (value.deviceIndex ?? 0)) && (
+              <option value={value.deviceIndex ?? 0}>
+                {available.length ? `Cámara USB #${value.deviceIndex ?? 0}` : "Sin buscar — use Buscar cámaras"}
+              </option>
+            )}
+            {available.map((device) => (
+              <option key={device.index} value={device.index}>
+                {device.name}
+              </option>
+            ))}
+          </select>
+          <button
+            type="button"
+            onClick={searchDevices}
+            disabled={disabled || searching}
+            title={disabled ? "Detenga la cámara para buscar dispositivos" : "Buscar cámaras conectadas"}
+            className="inline-flex items-center gap-1.5 rounded-lg border border-zinc-700 bg-zinc-900 px-3 py-2 text-sm text-zinc-200 transition hover:bg-zinc-800 disabled:cursor-not-allowed disabled:opacity-40"
+          >
+            {searching ? <LoaderCircle size={15} className="animate-spin" /> : <RefreshCw size={15} />}
+            {searching ? "Buscando..." : "Buscar cámaras"}
+          </button>
+          {notice && <span className="text-xs text-amber-400">{notice}</span>}
+        </>
       )}
 
       <select

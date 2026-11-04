@@ -1,6 +1,7 @@
 """Log con rotacion y respaldo automatico de la base de datos."""
 from __future__ import annotations
 
+import faulthandler
 import logging
 import sqlite3
 import threading
@@ -11,6 +12,7 @@ from core import config
 from core.settings import settings_store
 
 log = logging.getLogger("optical")
+_crash_file = None
 
 
 def setup_logging() -> None:
@@ -23,6 +25,13 @@ def setup_logging() -> None:
     if not any(isinstance(h, RotatingFileHandler) for h in root.handlers):
         root.addHandler(handler)
     root.setLevel(logging.INFO)
+
+    # Las caidas nativas (OpenCV/DirectShow, RealSense) no pasan por logging:
+    # faulthandler deja la traza de todos los hilos en crash.log.
+    global _crash_file
+    if _crash_file is None:
+        _crash_file = open(config.LOG_DIR / "crash.log", "a", encoding="utf-8")
+        faulthandler.enable(file=_crash_file, all_threads=True)
 
 
 def backup_database() -> str | None:

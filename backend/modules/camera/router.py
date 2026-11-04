@@ -63,23 +63,21 @@ def restart_camera(data: CameraStartRequest) -> dict:
 
 
 @router.get("/devices")
-def list_camera_devices() -> dict:
+def list_camera_devices(refresh: bool = False) -> dict:
+    """Dispositivos en cache; `refresh=true` vuelve a sondear (camara detenida)."""
+    result = camera_service.list_devices(refresh=refresh)
     current = camera_service.status
-    if current["running"]:
-        # No se reabre un dispositivo en uso: se informa el activo.
-        return {
-            "providers": ["realsense", "brio"],
-            "devices": [{
-                "provider": current["provider"],
-                "index": current["device_index"],
-                "name": current["device_name"] or current["provider"],
-                "serial": current["serial_number"],
-            }],
-        }
-    return {
-        "providers": ["realsense", "brio"],
-        "devices": camera_service.list_devices(),
-    }
+    devices = result["devices"]
+    if current["running"] and not any(
+        d["provider"] == current["provider"] and d["index"] == current["device_index"] for d in devices
+    ):
+        devices.append({
+            "provider": current["provider"],
+            "index": current["device_index"],
+            "name": current["device_name"] or current["provider"],
+            "serial": current["serial_number"],
+        })
+    return {"providers": ["realsense", "brio"], **result, "devices": devices}
 
 
 @router.post("/stop")
