@@ -24,6 +24,7 @@ import {
 import {
   drawingProcessedImageUrl,
   getDrawings,
+  getInspectionDetail,
   getInspections,
   getParts,
   inspectionOriginalImageUrl,
@@ -33,11 +34,14 @@ import {
 
 import type {
   DrawingRecord,
+  InspectionItemResult,
   InspectionRecord,
   PartRecord,
 } from "../types/api";
 
 import StatusBadge from "../components/StatusBadge";
+import InspectionResultView from "../components/InspectionResultView";
+import ZoomableImage from "../components/ZoomableImage";
 
 
 type DatabaseTab =
@@ -49,6 +53,9 @@ type DatabaseTab =
 type ImageViewerData = {
   title: string;
   url: string;
+  /** Si se indica, se cargan los resultados por feature para los tooltips. */
+  inspectionId?: number;
+  showMarkers?: boolean;
 };
 
 
@@ -1225,6 +1232,8 @@ function InspectionDetails({
                 inspectionOverlayImageUrl(
                   inspection.id,
                 ),
+              inspectionId: inspection.id,
+              showMarkers: true,
             })
           }
         />
@@ -1239,6 +1248,8 @@ function InspectionDetails({
                 inspectionRectifiedImageUrl(
                   inspection.id,
                 ),
+              inspectionId: inspection.id,
+              showMarkers: true,
             })
           }
         />
@@ -1253,6 +1264,8 @@ function InspectionDetails({
                 inspectionOriginalImageUrl(
                   inspection.id,
                 ),
+              inspectionId: inspection.id,
+              showMarkers: false,
             })
           }
         />
@@ -1399,6 +1412,17 @@ function ImageViewer({
   data: ImageViewerData;
   onClose: () => void;
 }) {
+  const [items, setItems] =
+    useState<InspectionItemResult[]>([]);
+
+  useEffect(() => {
+    setItems([]);
+    if (data.inspectionId == null) return;
+    getInspectionDetail(data.inspectionId)
+      .then((detail) => setItems(detail.items ?? []))
+      .catch(() => undefined);
+  }, [data.inspectionId]);
+
   return (
     <div
       onClick={onClose}
@@ -1463,9 +1487,23 @@ function ImageViewer({
 
         <div className="
           min-h-0 flex-1
-          overflow-auto bg-black p-4
+          overflow-y-auto bg-zinc-950 p-4
         ">
-          <img src={data.url} />
+          {data.inspectionId != null ? (
+            <InspectionResultView
+              url={data.url}
+              alt={data.title}
+              items={items}
+              showMarkers={Boolean(data.showMarkers)}
+              className="h-[70vh]"
+            />
+          ) : (
+            <ZoomableImage
+              src={data.url}
+              alt={data.title}
+              className="h-[80vh] rounded-xl"
+            />
+          )}
         </div>
       </div>
     </div>

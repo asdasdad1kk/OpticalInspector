@@ -23,6 +23,8 @@ import {
 } from "../lib/api";
 import { useCameraStream } from "../hooks/useCameraStream";
 import CameraSelector, { loadCameraOptions } from "../components/CameraSelector";
+import ZoomableImage, { type ImageMarker } from "../components/ZoomableImage";
+import { EDITABLE_TYPES, FEATURE_TYPES, typeLabel } from "../components/FeatureInfo";
 import type {
   CameraStatus,
   ReferenceAnalysis,
@@ -40,14 +42,6 @@ const CATEGORY_LABELS: Record<keyof ReferenceCategories, string> = {
   label: "Etiqueta",
 };
 
-// Mismos colores que el preview del DXF y de la pieza patron.
-const FEATURE_COLORS: Record<string, string> = {
-  INSERTO: "#fb923c",
-  INSERTO_LATON: "#facc15",
-  DELRON_CONICO: "#e879f9",
-  DELRON_PLANO: "#22c55e",
-};
-
 const inputClass =
   "w-full rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-2.5 text-sm outline-none placeholder:text-zinc-700 focus:border-emerald-500 focus:ring-2 focus:ring-emerald-500/15";
 
@@ -62,7 +56,6 @@ export default function ReferencePage() {
   const [photo, setPhoto] = useState<File>();
   const [photoUrl, setPhotoUrl] = useState<string>();
   const [correctedUrl, setCorrectedUrl] = useState<string>();
-  const [imageSize, setImageSize] = useState<{ width: number; height: number }>();
 
   const [camera, setCamera] = useState<CameraStatus>();
   const [cameraOptions, setCameraOptions] = useState<CameraStartOptions>(loadCameraOptions);
@@ -232,17 +225,90 @@ export default function ReferencePage() {
     (!analysis?.enabled.features || activeCount >= 4) &&
     !saving;
 
-  function handleOverlayClick(event: React.MouseEvent<SVGSVGElement>) {
-    if (!addMode || !imageSize) return;
-    const rect = event.currentTarget.getBoundingClientRect();
-    addFeatureAt(
-      ((event.clientX - rect.left) / rect.width) * imageSize.width,
-      ((event.clientY - rect.top) / rect.height) * imageSize.height,
-    );
-  }
-
   const unit = analysis?.dimensions.unit ?? "mm";
   const scale = analysis?.scale ?? 1;
+
+  const markers: ImageMarker[] = (analysis?.features ?? []).map((item) => ({
+    key: item.id,
+    x: item.x / scale,
+    y: -item.y / scale,
+    r: Math.max(6, item.radius / scale) + 4,
+    color: !item.enabled || !analysis?.enabled.features
+      ? "#71717a"
+      : FEATURE_TYPES[item.type]?.color ?? "#fb923c",
+    label: String(item.id),
+    dim: !item.enabled,
+  }));
+
+  function setFeatureType(id: number, type: string) {
+    updateFeature(id, {
+      type,
+      material: type === "INSERTO" ? "ACERO" : type === "INSERTO_LATON" ? "LATON" : "DELRON",
+    });
+  }
+
+  function renderFeatureTooltip(key: string | number, pinned: boolean) {
+    const item = analysis?.features.find((feature) => feature.id === key);
+    if (!item) return null;
+    return (
+      <div className="space-y-2 pr-4">
+        <div className="flex items-center gap-2">
+          <span className="h-2.5 w-2.5 rounded-full" style={{ background: FEATURE_TYPES[item.type]?.color ?? "#a1a1aa" }} />
+          <span className="font-semibold">#{item.id} · {typeLabel(item.type)}</span>
+          {!item.enabled && <span className="rounded bg-zinc-800 px-1.5 py-0.5 text-[10px] text-zinc-400">Inactivo</span>}
+        </div>
+        <p className="text-zinc-400">{FEATURE_TYPES[item.type]?.description}</p>
+        <p className="text-[10px] text-zinc-500">
+          Radio {item.radius.toFixed(2)} {unit}
+          {item.radius_reliable === false ? " · radio estimado (bajo contraste)" : ""}
+        </p>
+        {pinned ? (
+          <div className="space-y-2 border-t border-zinc-800 pt-2">
+            <div>
+              <p className="mb-1 text-[10px] font-medium uppercase tracking-wide text-zinc-500">Tipo</p>
+              <div className="grid grid-cols-3 gap-1">
+                {EDITABLE_TYPES.map((type) => (
+                  <button
+                    key={type}
+                    type="button"
+                    onClick={() => setFeatureType(item.id, type)}
+                    className={`rounded-md border px-1.5 py-1 text-[11px] transition ${
+                      item.type === type
+                        ? "border-transparent font-semibold text-zinc-950"
+                        : "border-zinc-700 text-zinc-300 hover:bg-zinc-800"
+                    }`}
+                    style={item.type === type ? { background: FEATURE_TYPES[type].color } : undefined}
+                  >
+                    {FEATURE_TYPES[type].label}
+                  </button>
+                ))}
+              </div>
+            </div>
+            <div className="flex items-center justify-between gap-2">
+              <label className="flex cursor-pointer items-center gap-2">
+                <input
+                  type="checkbox"
+                  className="accent-emerald-500"
+                  checked={item.enabled}
+                  onChange={(event) => updateFeature(item.id, { enabled: event.target.checked })}
+                />
+                Verificar este feature
+              </label>
+              <button
+                type="button"
+                className="inline-flex items-center gap-1 text-zinc-500 hover:text-red-400"
+                onClick={() => removeFeature(item.id)}
+              >
+                <Trash2 size={13} /> Eliminar
+              </button>
+            </div>
+          </div>
+        ) : (
+          <p className="text-[10px] text-zinc-500">Clic para cambiar tipo, activar o eliminar.</p>
+        )}
+      </div>
+    );
+  }
 
   return (
     <div className="space-y-6">
@@ -316,77 +382,45 @@ export default function ReferencePage() {
 
           <div className="relative flex aspect-video items-center justify-center bg-black">
             {photoUrl ? (
-              <div className="relative max-h-full max-w-full">
-                <img
-                  src={correctedUrl ?? photoUrl}
-                  alt="Pieza patrón"
-                  className="block max-h-[70vh] w-auto max-w-full"
-                  onLoad={(event) =>
-                    setImageSize({
-                      width: event.currentTarget.naturalWidth,
-                      height: event.currentTarget.naturalHeight,
-                    })
-                  }
-                />
-                {analysis && imageSize && (
-                  <svg
-                    viewBox={`0 0 ${imageSize.width} ${imageSize.height}`}
-                    className={`absolute inset-0 h-full w-full ${addMode ? "cursor-crosshair" : ""}`}
-                    onClick={handleOverlayClick}
-                  >
-                    {analysis.enabled.contour && (
-                      <polygon
-                        points={analysis.contour.map(([x, y]) => `${x / scale},${-y / scale}`).join(" ")}
-                        fill="none"
-                        stroke="#facc15"
-                        strokeWidth={Math.max(2, imageSize.width / 600)}
-                      />
-                    )}
-                    {analysis.enabled.label && analysis.label && (
-                      <rect
-                        x={analysis.label.x / scale - analysis.label.w / scale / 2}
-                        y={-analysis.label.y / scale - analysis.label.h / scale / 2}
-                        width={analysis.label.w / scale}
-                        height={analysis.label.h / scale}
-                        transform={`rotate(${analysis.label.angle + 90} ${analysis.label.x / scale} ${-analysis.label.y / scale})`}
-                        fill="none"
-                        stroke="#38bdf8"
-                        strokeWidth={Math.max(2, imageSize.width / 600)}
-                      />
-                    )}
-                    {analysis.features.map((item) => {
-                      const cx = item.x / scale;
-                      const cy = -item.y / scale;
-                      const r = Math.max(6, item.radius / scale) + 4;
-                      const color = !item.enabled || !analysis.enabled.features
-                        ? "#71717a"
-                        : FEATURE_COLORS[item.type] ?? "#fb923c";
-                      return (
-                        <g
-                          key={item.id}
-                          className={addMode ? undefined : "cursor-pointer"}
-                          onClick={(event) => {
-                            if (addMode) return;
-                            event.stopPropagation();
-                            updateFeature(item.id, { enabled: !item.enabled });
-                          }}
-                        >
-                          <circle cx={cx} cy={cy} r={r} fill="transparent" stroke={color} strokeWidth={Math.max(2, imageSize.width / 500)} />
-                          <text
-                            x={cx + r + 2}
-                            y={cy - r}
-                            fill="#f87171"
-                            fontSize={Math.max(12, imageSize.width / 70)}
-                            fontWeight={700}
-                          >
-                            {item.id}
-                          </text>
-                        </g>
-                      );
-                    })}
-                  </svg>
-                )}
-              </div>
+              <ZoomableImage
+                src={correctedUrl ?? photoUrl}
+                alt="Pieza patrón"
+                className="absolute inset-0"
+                crosshair={addMode}
+                markers={analysis ? markers : []}
+                renderTooltip={analysis ? renderFeatureTooltip : undefined}
+                onImageClick={addMode ? addFeatureAt : undefined}
+                overlay={
+                  analysis && (
+                    <>
+                      {analysis.enabled.contour && (
+                        <polygon
+                          points={analysis.contour.map(([x, y]) => `${x / scale},${-y / scale}`).join(" ")}
+                          fill="none"
+                          stroke="#facc15"
+                          strokeWidth={2}
+                          vectorEffect="non-scaling-stroke"
+                          pointerEvents="none"
+                        />
+                      )}
+                      {analysis.enabled.label && analysis.label && (
+                        <rect
+                          x={analysis.label.x / scale - analysis.label.w / scale / 2}
+                          y={-analysis.label.y / scale - analysis.label.h / scale / 2}
+                          width={analysis.label.w / scale}
+                          height={analysis.label.h / scale}
+                          transform={`rotate(${analysis.label.angle + 90} ${analysis.label.x / scale} ${-analysis.label.y / scale})`}
+                          fill="none"
+                          stroke="#38bdf8"
+                          strokeWidth={2}
+                          vectorEffect="non-scaling-stroke"
+                          pointerEvents="none"
+                        />
+                      )}
+                    </>
+                  )
+                }
+              />
             ) : source === "camera" ? (
               stream.imageUrl && camera?.running ? (
                 <img src={stream.imageUrl} alt="Vista en vivo" className="max-h-full max-w-full" />
@@ -409,7 +443,7 @@ export default function ReferencePage() {
               {analysis
                 ? addMode
                   ? "Haga clic sobre la imagen para agregar un feature."
-                  : "Clic en un círculo para activarlo o desactivarlo."
+                  : "Pase el cursor sobre un feature para ver qué es; clic para cambiar su tipo."
                 : "Capture o seleccione una imagen y analícela."}
             </p>
             <div className="flex gap-2">

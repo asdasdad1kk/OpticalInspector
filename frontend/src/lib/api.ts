@@ -1,4 +1,4 @@
-import type { InspectionOptions, ReferenceAnalysis, CameraDevice, CameraProvider, CameraStatus, DatabaseResponse, DrawingRecord, InspectionRecord, InspectionResponse, PartRecord, UploadResponse } from "../types/api";
+import type { InspectionOptions, ReferenceAnalysis, CameraDevice, CameraProvider, CameraStatus, DatabaseResponse, DrawingRecord, InspectionDetail, InspectionRecord, InspectionResponse, PartRecord, UploadResponse } from "../types/api";
 
 export const API_URL = import.meta.env.VITE_API_URL ?? "http://127.0.0.1:8000";
 export const WS_URL = import.meta.env.VITE_WS_URL ?? "ws://127.0.0.1:8000";
@@ -294,6 +294,13 @@ export async function getInspections(): Promise<
 //     `?v=${Date.now()}`
 //   );
 // }
+
+
+export async function getInspectionDetail(id: number): Promise<InspectionDetail> {
+  const response = await fetch(`${API_URL}/database/inspections/${id}`, { cache: "no-store" });
+  if (!response.ok) throw new Error(await parseError(response));
+  return response.json();
+}
 
 
 export function inspectionOriginalImageUrl(

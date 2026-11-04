@@ -165,3 +165,28 @@ export interface ReferenceAnalysis {
   scale_source?: "dimension" | "calibracion" | "relativa";
   image_jpeg?: string | null;
 }
+
+/** Resultado por feature guardado en la inspección (coordenadas del canvas rectificado). */
+export interface InspectionItemResult {
+  id: number | string;
+  type: string;
+  kind?: "contour" | "label" | "distances";
+  status: "OK" | "REVISAR" | "FALLO";
+  score?: number;
+  found?: boolean;
+  center_x_px?: number;
+  center_y_px?: number;
+  expected_radius_px?: number;
+  deviation?: number | null;
+  radius_ratio?: number | null;
+  observed_type?: string | null;
+  box?: [number, number, number, number];
+  reasons?: string[];
+  checks?: Record<string, string>;
+}
+
+export interface InspectionDetail extends InspectionRecord {
+  description?: string | null;
+  items: InspectionItemResult[];
+  alignment: Record<string, unknown>;
+}

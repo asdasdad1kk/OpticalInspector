@@ -17,6 +17,7 @@ import {
 
 import {
   getCameraStatus,
+  getInspectionDetail,
   inspectCapture,
   inspectionImageUrl,
   inspectPhoto,
@@ -25,9 +26,11 @@ import {
   type CameraStartOptions,
 } from "../lib/api";
 import { useCameraStream } from "../hooks/useCameraStream";
-import type { CameraStatus, InspectionOptions, InspectionResponse } from "../types/api";
+import type { CameraStatus, InspectionItemResult, InspectionOptions, InspectionResponse } from "../types/api";
 import StatusBadge from "../components/StatusBadge";
 import CameraSelector, { loadCameraOptions } from "../components/CameraSelector";
+import InspectionResultView from "../components/InspectionResultView";
+import ZoomableImage from "../components/ZoomableImage";
 
 type InspectionSource = "camera" | "photo";
 type ResultImageType =
@@ -54,6 +57,7 @@ export default function InspectPage() {
   const [inspecting, setInspecting] = useState(false);
   const [error, setError] = useState<string>();
   const [result, setResult] = useState<InspectionResponse>();
+  const [resultItems, setResultItems] = useState<InspectionItemResult[]>([]);
   const [activeImage, setActiveImage] =
     useState<ResultImageType>("overlay-image");
 
@@ -197,6 +201,12 @@ export default function InspectPage() {
 
       setResult(response);
       setActiveImage("overlay-image");
+      setResultItems([]);
+      if (response.inspection_id) {
+        getInspectionDetail(response.inspection_id)
+          .then((detail) => setResultItems(detail.items ?? []))
+          .catch(() => undefined);
+      }
     } catch (error) {
       setError(
         error instanceof Error
@@ -379,15 +389,15 @@ export default function InspectPage() {
               )
             ) : localPhotoUrl ? (
               <>
-                <img
+                <ZoomableImage
                   src={localPhotoUrl}
-                  className="h-full w-full object-contain"
+                  className="absolute inset-0"
                   alt="Fotografía seleccionada para inspección"
                 />
                 <button
                   type="button"
                   onClick={removePhoto}
-                  className="absolute right-4 top-4 grid h-9 w-9 place-items-center rounded-lg border border-zinc-700 bg-zinc-950/90 text-zinc-400 backdrop-blur transition hover:bg-red-500/15 hover:text-red-400"
+                  className="absolute right-4 top-4 z-30 grid h-9 w-9 place-items-center rounded-lg border border-zinc-700 bg-zinc-950/90 text-zinc-400 backdrop-blur transition hover:bg-red-500/15 hover:text-red-400"
                   aria-label="Quitar fotografía"
                 >
                   <X size={18} />
@@ -652,12 +662,13 @@ export default function InspectPage() {
           </div>
 
           <div className="mt-5 grid gap-5 lg:grid-cols-[1fr_320px]">
-            <div className="overflow-hidden rounded-xl border border-zinc-800 bg-black">
+            <div className="min-w-0">
               {resultUrl && (
-                <img
-                  src={resultUrl}
+                <InspectionResultView
+                  url={resultUrl}
                   alt="Resultado de inspección"
-                  className="aspect-video h-full w-full object-contain"
+                  items={resultItems}
+                  showMarkers={activeImage !== "original-image"}
                 />
               )}
             </div>
