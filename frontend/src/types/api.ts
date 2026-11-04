@@ -137,7 +137,7 @@ export interface InspectionOptions {
 export interface ReferenceFeature {
   id: number;
   type: string;
-  material: "LATON" | "ACERO";
+  material: "LATON" | "ACERO" | "DELRON";
   x: number;
   y: number;
   radius: number;

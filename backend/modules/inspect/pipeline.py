@@ -236,6 +236,104 @@ def classify_color(
     }
 
 
+# Tipos que el clasificador de forma sabe distinguir.
+FEATURE_TYPES = ("INSERTO", "DELRON_CONICO", "DELRON_PLANO")
+# Delron conico: la cara inclinada del cono se ve saturada (dorada) junto al
+# agujero y pierde saturacion hacia el borde. Se evalua Sin + (Sin - Sout).
+CONE_SCORE_MIN = 54.0
+# Inserto: disco gris claramente mas oscuro que la placa alrededor.
+INSERT_DISK_RATIO_MAX = 0.79
+
+
+def _radial_profile(channel: np.ndarray, cx: float, cy: float, radii: np.ndarray) -> np.ndarray:
+    """Mediana angular por radio: robusta a reflejos y a las pestañas del inserto."""
+    angles = np.linspace(0, 2 * math.pi, 96, endpoint=False)
+    xs = (cx + np.outer(radii, np.cos(angles))).astype(np.float32)
+    ys = (cy + np.outer(radii, np.sin(angles))).astype(np.float32)
+    values = cv2.remap(channel, xs, ys, cv2.INTER_LINEAR, borderMode=cv2.BORDER_REPLICATE)
+    return np.median(values, axis=1)
+
+
+def classify_feature_type(
+    gray: np.ndarray, hsv: np.ndarray, cx: float, cy: float, radius_px: float
+) -> dict[str, Any] | None:
+    """INSERTO / DELRON_CONICO / DELRON_PLANO por el perfil radial.
+
+    - Inserto: disco gris (con pestañas) mas oscuro que la placa, sin color.
+    - Delron conico: cono saturado alrededor del agujero que se desvanece
+      hacia el borde (a veces con aro brillante exterior).
+    - Delron plano: anillo beige uniforme y ancho, sin gradiente.
+    Todo se mide en multiplos del radio del agujero: no depende de la escala.
+    Devuelve None si el centro no es un agujero oscuro (reflejo, mancha).
+    """
+    rmax = max(30.0, 8.0 * radius_px)
+    step = rmax / 240.0
+    radii = np.arange(0.0, rmax, step)
+    gray_f = gray.astype(np.float32) if gray.dtype != np.float32 else gray
+    sat = hsv[:, :, 1].astype(np.float32)
+    brightness = _radial_profile(gray_f, cx, cy, radii)
+    saturation = _radial_profile(sat, cx, cy, radii)
+
+    # Borde del agujero: primera subida significativa del perfil; el radio es
+    # el punto medio de esa subida (estable aunque el borde sea una rampa).
+    k = max(1, int(round(0.6 / step)))
+    smooth = np.convolve(np.pad(brightness, k, mode="edge"), np.ones(k) / k, mode="same")[k:-k]
+    gradient = np.gradient(smooth, radii)
+    half = len(radii) // 2
+    peak = float(gradient[:half].max())
+    if peak <= 0:
+        return None
+    rise = None
+    for index in range(1, half - 1):
+        if (
+            gradient[index] >= 0.4 * peak
+            and gradient[index] >= gradient[index - 1]
+            and gradient[index] >= gradient[index + 1]
+        ):
+            rise = index
+            break
+    if rise is None:
+        return None
+    end = rise
+    while end < half - 1 and gradient[end] >= 0.4 * gradient[rise]:
+        end += 1
+    low = float(smooth[:rise + 1].min())
+    middle = (low + float(smooth[end])) / 2.0
+    above = np.nonzero(smooth[:end + 1] >= middle)[0]
+    hole = float(radii[above[0]]) if len(above) else float(radii[rise])
+    if hole < 1.0:
+        return None
+
+    def band(profile: np.ndarray, low: float, high: float) -> float:
+        mask = (radii >= low * hole) & (radii <= high * hole)
+        return float(np.median(profile[mask])) if mask.any() else float("nan")
+
+    center = band(brightness, 0.0, 0.4)
+    disk = band(brightness, 1.6, 2.4)
+    plate = band(brightness, 4.5, 6.0)
+    sat_in = band(saturation, 1.15, 1.45)
+    sat_out = band(saturation, 2.0, 2.4)
+    if not all(np.isfinite([center, disk, plate, sat_in, sat_out])):
+        return None
+    if center > 0.6 * disk:
+        return None
+
+    cone_score = sat_in + (sat_in - sat_out)
+    disk_ratio = disk / max(plate, 1.0)
+    if cone_score >= CONE_SCORE_MIN:
+        observed = "DELRON_CONICO"
+    elif disk_ratio <= INSERT_DISK_RATIO_MAX:
+        observed = "INSERTO"
+    else:
+        observed = "DELRON_PLANO"
+    return {
+        "observed_type": observed,
+        "hole_radius_px": round(hole, 2),
+        "cone_score": round(cone_score, 1),
+        "disk_ratio": round(disk_ratio, 3),
+    }
+
+
 # ============================================================
 # EVALUACION DE UN FEATURE
 # ============================================================
@@ -310,7 +408,26 @@ def evaluate_feature(
         hsv, found_x, found_y, radius_px, options["brass_saturation"], item.get("color_reach", 1.3)
     )
     expected_brass = item["type"] in TYPE_BRASS or item.get("material") == "LATON"
-    if options["check_type"]:
+    shape = None
+    if item["type"] in FEATURE_TYPES:
+        shape = classify_feature_type(gray, hsv, found_x, found_y, radius_px)
+    if options["check_type"] and shape is not None:
+        if shape["observed_type"] == item["type"]:
+            checks["type"] = "OK"
+            score_parts.append(100.0)
+        else:
+            checks["type"] = "FALLO"
+            status_rank = 2
+            reasons.append(
+                f"Tipo incorrecto: se esperaba {item['type'].replace('_', ' ').lower()} "
+                f"y se observa {shape['observed_type'].replace('_', ' ').lower()}."
+            )
+            score_parts.append(0.0)
+    elif options["check_type"] and item["type"] in FEATURE_TYPES:
+        checks["type"] = "REVISAR"
+        status_rank = max(status_rank, 1)
+        reasons.append("No se pudo determinar el tipo (inserto / delron).")
+    elif options["check_type"]:
         observed_brass = color["observed"] == "LATON"
         if observed_brass == expected_brass:
             checks["type"] = "OK"
@@ -371,6 +488,7 @@ def evaluate_feature(
         "measured_radius_px": None if measured_radius is None else round(measured_radius, 2),
         "radius_ratio": None if radius_ratio is None else round(radius_ratio, 3),
         "color": color,
+        "observed_type": None if shape is None else shape["observed_type"],
         "chamfer": None if edge is None else round(edge["chamfer"], 2),
         "coverage": None if edge is None else round(edge["coverage"], 2),
         "reasons": reasons,

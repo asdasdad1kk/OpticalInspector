@@ -16,12 +16,20 @@ from typing import Any
 import cv2
 import numpy as np
 
-from .pipeline import classify_color, measure_radius
+from .pipeline import classify_color, classify_feature_type, measure_radius
 from .registration import detect_blob_candidates
 
 FEATURE_CATEGORIES = ("features", "contour", "distances", "label")
 
 DEFAULT_ENABLED = {key: True for key in FEATURE_CATEGORIES}
+
+MATERIAL_BY_TYPE = {"INSERTO": "ACERO", "DELRON_CONICO": "DELRON", "DELRON_PLANO": "DELRON"}
+# Mismos colores (BGR) que el preview del DXF.
+TYPE_COLORS = {
+    "INSERTO": (0, 165, 255),
+    "DELRON_CONICO": (255, 0, 255),
+    "DELRON_PLANO": (0, 200, 0),
+}
 
 
 # ============================================================
@@ -40,22 +48,29 @@ def _blob_shape(gray: np.ndarray, candidate: dict[str, float]) -> dict[str, floa
 
     blurred = cv2.GaussianBlur(window, (0, 0), 1.0)
     threshold, _ = cv2.threshold(blurred, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
-    dark = (blurred < threshold).astype(np.uint8)
-    count, labels, stats, centroids = cv2.connectedComponentsWithStats(dark)
-    px = min(cx - x1, labels.shape[1] - 1)
-    py = min(cy - y1, labels.shape[0] - 1)
-    label = labels[py, px]
-    if label == 0:
-        near = [(math.hypot(centroids[i][0] - px, centroids[i][1] - py), i) for i in range(1, count)]
-        if not near:
-            return None
-        label = min(near)[1]
+    darkest = float(blurred.min())
+    # Si el componente toca la ventana (agujero unido a la sombra de un cono o
+    # a un gradiente de luz) se reintenta con un umbral mas cercano al nucleo.
+    for _ in range(3):
+        dark = (blurred < threshold).astype(np.uint8)
+        count, labels, stats, centroids = cv2.connectedComponentsWithStats(dark)
+        px = min(cx - x1, labels.shape[1] - 1)
+        py = min(cy - y1, labels.shape[0] - 1)
+        label = labels[py, px]
+        if label == 0:
+            near = [(math.hypot(centroids[i][0] - px, centroids[i][1] - py), i) for i in range(1, count)]
+            if not near:
+                return None
+            label = min(near)[1]
 
-    left, top, width, height, area = stats[label]
-    touches = (
-        left == 0 or top == 0
-        or left + width >= window.shape[1] or top + height >= window.shape[0]
-    )
+        left, top, width, height, area = stats[label]
+        touches = (
+            left == 0 or top == 0
+            or left + width >= window.shape[1] or top + height >= window.shape[0]
+        )
+        if not touches:
+            break
+        threshold = (darkest + threshold) / 2.0
     contours, _ = cv2.findContours(
         (labels == label).astype(np.uint8), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE
     )
@@ -97,23 +112,27 @@ def detect_features(image: np.ndarray) -> list[dict[str, Any]]:
             radius = measured
             if converged:
                 break
+        shape_type = classify_feature_type(gray, hsv, candidate["x"], candidate["y"], radius)
+        if shape_type is None:
+            continue  # centro no oscuro: reflejo o mancha, no un agujero
         color = classify_color(hsv, candidate["x"], candidate["y"], radius, 60)
         features.append({
+            "type": shape_type["observed_type"],
             "x_px": candidate["x"],
             "y_px": candidate["y"],
             "radius_px": float(radius),
             "response": candidate["response"],
-            "material": color["observed"],
+            "material": MATERIAL_BY_TYPE[shape_type["observed_type"]],
             "saturation": color["saturation"],
             "circularity": round(shape["circularity"], 2),
             "radius_reliable": bool(consistency >= 0.5),
         })
 
-    # Radios no fiables (sombra, bajo contraste) heredan el radio tipico del mismo material.
+    # Radios no fiables (sombra, bajo contraste) heredan el radio tipico del mismo tipo.
     for item in features:
         if item["radius_reliable"]:
             continue
-        peers = [f["radius_px"] for f in features if f["radius_reliable"] and f["material"] == item["material"]]
+        peers = [f["radius_px"] for f in features if f["radius_reliable"] and f["type"] == item["type"]]
         peers = peers or [f["radius_px"] for f in features if f["radius_reliable"]]
         if peers:
             item["radius_px"] = float(np.median(peers))
@@ -264,10 +283,9 @@ def analyze_reference(
 
     features = []
     for index, item in enumerate(raw_features, start=1):
-        brass = item["material"] == "LATON"
         features.append({
             "id": index,
-            "type": "INSERTO_LATON" if brass else "INSERTO",
+            "type": item["type"],
             "material": item["material"],
             "x": round(item["x_px"] * scale, 4),
             "y": round(-item["y_px"] * scale, 4),
@@ -331,7 +349,7 @@ def draw_reference_preview(
         px = int(round(item["x"] / scale))
         py = int(round(-item["y"] / scale))
         radius = max(5, int(round(item["radius"] / scale)))
-        color = (0, 165, 255) if item["material"] == "LATON" else (0, 200, 0)
+        color = TYPE_COLORS.get(item["type"], (0, 165, 255))
         if not item.get("enabled", True):
             color = (128, 128, 128)
         cv2.circle(output, (px, py), radius + 3, color, 2, cv2.LINE_AA)

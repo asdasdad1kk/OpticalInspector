@@ -40,6 +40,14 @@ const CATEGORY_LABELS: Record<keyof ReferenceCategories, string> = {
   label: "Etiqueta",
 };
 
+// Mismos colores que el preview del DXF y de la pieza patron.
+const FEATURE_COLORS: Record<string, string> = {
+  INSERTO: "#fb923c",
+  INSERTO_LATON: "#facc15",
+  DELRON_CONICO: "#e879f9",
+  DELRON_PLANO: "#22c55e",
+};
+
 const inputClass =
   "w-full rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-2.5 text-sm outline-none placeholder:text-zinc-700 focus:border-emerald-500 focus:ring-2 focus:ring-emerald-500/15";
 
@@ -352,9 +360,7 @@ export default function ReferencePage() {
                       const r = Math.max(6, item.radius / scale) + 4;
                       const color = !item.enabled || !analysis.enabled.features
                         ? "#71717a"
-                        : item.material === "LATON"
-                          ? "#fb923c"
-                          : "#22c55e";
+                        : FEATURE_COLORS[item.type] ?? "#fb923c";
                       return (
                         <g
                           key={item.id}
@@ -520,15 +526,17 @@ export default function ReferencePage() {
                       />
                       <span className="w-6 font-semibold text-zinc-400">{item.id}</span>
                       <select
-                        value={item.material}
+                        value={item.type}
                         onChange={(event) => {
-                          const material = event.target.value as "LATON" | "ACERO";
-                          updateFeature(item.id, { material, type: material === "LATON" ? "INSERTO_LATON" : "INSERTO" });
+                          const type = event.target.value;
+                          updateFeature(item.id, { type, material: type === "INSERTO" ? "ACERO" : type === "INSERTO_LATON" ? "LATON" : "DELRON" });
                         }}
                         className="flex-1 rounded border border-zinc-700 bg-zinc-900 px-1.5 py-1"
                       >
-                        <option value="ACERO">Inserto (acero)</option>
-                        <option value="LATON">Inserto (latón)</option>
+                        <option value="INSERTO">Inserto</option>
+                        <option value="DELRON_CONICO">Delron cónico</option>
+                        <option value="DELRON_PLANO">Delron plano</option>
+                        {item.type === "INSERTO_LATON" && <option value="INSERTO_LATON">Inserto (latón)</option>}
                       </select>
                       <button
                         type="button"
