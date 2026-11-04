@@ -6,15 +6,18 @@ from typing import Any
 
 import cv2
 import numpy as np
-from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, status
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Response, UploadFile, status
 from sqlmodel import Session, select
 
+from core import config, storage
 from core.db import get_session
 from models import Drawing, Part
 from modules.inspect.golden import DEFAULT_ENABLED, analyze_reference, draw_reference_preview
 from modules.inspect.calibration import calibration_service
 from modules.inspect.service import decode_image, encode_png, prepare_image
 
+
+PNG_MAGIC = bytes([0x89, 0x50, 0x4E, 0x47])
 
 router = APIRouter(
     prefix="/reference",
@@ -112,6 +115,11 @@ async def save(
         raise HTTPException(status_code=400, detail=str(error)) from error
 
     scale = float(payload.get("scale", 1.0)) or 1.0
+    # Foto limpia (sin anotaciones) como textura del modelo 3D; sus coordenadas son las del analisis.
+    photo_path: str | None = None
+    ok, encoded_photo = cv2.imencode(".jpg", image, [cv2.IMWRITE_JPEG_QUALITY, 90])
+    if ok:
+        photo_path = storage.save_bytes(config.IMAGES_DIR, encoded_photo.tobytes(), "reference", ".jpg")
     contour_px = np.float32([[x / scale, -y / scale] for x, y in payload.get("contour", [])])
     preview = draw_reference_preview(
         image,
@@ -154,6 +162,8 @@ async def save(
                     "scale": scale,
                     "relative": bool(payload.get("relative", False)),
                     "enabled": enabled,
+                    "photo_path": photo_path,
+                    "image_size": [int(image.shape[1]), int(image.shape[0])],
                 },
             },
         )
@@ -178,3 +188,72 @@ async def save(
         "summary": summary,
         "message": "Pieza patron guardada correctamente.",
     }
+
+
+# ============================================================
+# MODELO 3D
+# ============================================================
+
+@router.get("/{drawing_id}/model")
+def get_model(drawing_id: int, session: Session = Depends(get_session)) -> dict[str, Any]:
+    """Datos para reconstruir la pieza en 3D (contorno, features, foto de textura).
+
+    Piezas de pieza real: contorno medido y foto limpia. Piezas de DXF: panel
+    rectangular con los features del CAD y sin textura. Coordenadas con Y hacia arriba.
+    """
+    drawing = session.get(Drawing, drawing_id)
+    if drawing is None:
+        raise HTTPException(status_code=404, detail="Drawing no encontrado.")
+    part = session.get(Part, drawing.part_id)
+    rois = drawing.rois or {}
+    items = [item for item in rois.get("items", []) if item.get("enabled", True)]
+    bounds = rois.get("bounds") or {}
+    golden = rois.get("golden")
+
+    if golden:
+        contour = golden.get("contour") or []
+        dims = golden.get("dimensions") or {}
+        unit = dims.get("unit", "mm")
+        scale = float(golden.get("scale", 1.0)) or 1.0
+        texture = None
+        if golden.get("photo_path") and golden.get("image_size"):
+            texture = {
+                "url": f"/api/reference/{drawing_id}/photo",
+                "width": golden["image_size"][0],
+                "height": golden["image_size"][1],
+                "scale": scale,
+            }
+    else:
+        if not bounds:
+            raise HTTPException(status_code=409, detail="La pieza no tiene dimensiones para reconstruirla.")
+        contour = [
+            [bounds["xmin"], bounds["ymin"]], [bounds["xmax"], bounds["ymin"]],
+            [bounds["xmax"], bounds["ymax"]], [bounds["xmin"], bounds["ymax"]],
+        ]
+        unit, texture = "mm", None
+
+    return {
+        "drawing_id": drawing_id,
+        "part_number": part.part_number if part else "",
+        "revision": part.revision if part else "",
+        "source": "golden" if golden else "dxf",
+        "unit": unit,
+        "contour": contour,
+        "bounds": bounds,
+        "features": items,
+        "texture": texture,
+    }
+
+
+@router.get("/{drawing_id}/photo")
+def get_photo(drawing_id: int, session: Session = Depends(get_session)) -> Response:
+    drawing = session.get(Drawing, drawing_id)
+    golden = (drawing.rois or {}).get("golden") if drawing else None
+    path = golden.get("photo_path") if golden else None
+    if not path:
+        raise HTTPException(status_code=404, detail="Esta pieza no tiene foto de referencia.")
+    try:
+        content = storage.read_bytes(config.IMAGES_DIR, path)
+    except (OSError, ValueError) as error:
+        raise HTTPException(status_code=404, detail="Foto de referencia no disponible.") from error
+    return Response(content=content, media_type="image/png" if content[:4] == PNG_MAGIC else "image/jpeg")

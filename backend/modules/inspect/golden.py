@@ -122,6 +122,7 @@ def detect_features(image: np.ndarray) -> list[dict[str, Any]]:
             "x_px": candidate["x"],
             "y_px": candidate["y"],
             "radius_px": float(radius),
+            "bore_px": float(radius if shape_type["observed_type"] == "BARRENO" else shape_type["hole_radius_px"]),
             "response": candidate["response"],
             "material": MATERIAL_BY_TYPE[shape_type["observed_type"]],
             "saturation": color["saturation"],
@@ -203,6 +204,7 @@ def detect_large_holes(
             "x_px": cx,
             "y_px": cy,
             "radius_px": float(verdict["hole_radius_px"]),
+            "bore_px": float(verdict["hole_radius_px"]),
             "response": float(verdict["contrast"]),
             "material": MATERIAL_BY_TYPE["BARRENO"],
             "saturation": 0.0,
@@ -360,6 +362,10 @@ def analyze_reference(
             "x": round(item["x_px"] * scale, 4),
             "y": round(-item["y_px"] * scale, 4),
             "radius": round(max(item["radius_px"], 3.0) * scale, 4),
+            # Radio del barreno central (para el modelo 3D); en insertos/delrones es menor que `radius`.
+            "bore_radius": round(
+                (item["radius_px"] if item["type"] == "BARRENO" else min(item["bore_px"], 0.9 * item["radius_px"])) * scale, 4
+            ),
             "enabled": True,
             "radius_reliable": item["radius_reliable"],
             "saturation": item["saturation"],

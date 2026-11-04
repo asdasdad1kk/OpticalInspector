@@ -143,6 +143,8 @@ export interface ReferenceFeature {
   radius: number;
   enabled: boolean;
   radius_reliable?: boolean;
+  /** Radio del barreno central (insertos/delrones); para el modelo 3D. */
+  bore_radius?: number;
 }
 
 export interface ReferenceCategories {
@@ -189,4 +191,16 @@ export interface InspectionDetail extends InspectionRecord {
   description?: string | null;
   items: InspectionItemResult[];
   alignment: Record<string, unknown>;
+}
+
+/** Respuesta de /reference/{id}/model: lo necesario para reconstruir la pieza en 3D. */
+export interface PartModelResponse {
+  drawing_id: number;
+  part_number: string;
+  revision: string;
+  source: "golden" | "dxf";
+  unit: string;
+  contour: [number, number][];
+  features: ReferenceFeature[];
+  texture: { url: string; width: number; height: number; scale: number } | null;
 }

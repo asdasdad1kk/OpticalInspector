@@ -90,6 +90,10 @@ def test_reference_counts() -> None:
     for name, counts in expected.items():
         features = analyze_reference(load(name))["features"]
         assert dict(collections.Counter(f["type"] for f in features)) == counts, name
+        for feature in features:  # el modelo 3D necesita el radio del barreno central
+            assert 0 < feature["bore_radius"] <= feature["radius"], (name, feature["id"])
+            if feature["type"] != B:
+                assert feature["bore_radius"] < feature["radius"], (name, feature["id"])
     print("pieza patron: conteos por tipo OK")
 
 

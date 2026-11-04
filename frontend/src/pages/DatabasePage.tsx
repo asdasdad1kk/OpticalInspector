@@ -1,10 +1,13 @@
 import {
+  Suspense,
+  lazy,
   useEffect,
   useMemo,
   useState,
 } from "react";
 
 import {
+  Box,
   Boxes,
   CalendarDays,
   CheckCircle2,
@@ -26,6 +29,7 @@ import {
   getDrawings,
   getInspectionDetail,
   getInspections,
+  getPartModel,
   getParts,
   inspectionOriginalImageUrl,
   inspectionOverlayImageUrl,
@@ -36,12 +40,16 @@ import type {
   DrawingRecord,
   InspectionItemResult,
   InspectionRecord,
+  PartModelResponse,
   PartRecord,
 } from "../types/api";
 
 import StatusBadge from "../components/StatusBadge";
 import InspectionResultView from "../components/InspectionResultView";
 import ZoomableImage from "../components/ZoomableImage";
+
+// three.js pesa bastante: solo se descarga al abrir la vista 3D.
+const PartViewer3D = lazy(() => import("../components/PartViewer3D"));
 
 
 type DatabaseTab =
@@ -90,6 +98,11 @@ export default function DatabasePage() {
     imageViewer,
     setImageViewer,
   ] = useState<ImageViewerData>();
+
+  const [
+    viewer3D,
+    setViewer3D,
+  ] = useState<DrawingRecord>();
 
 
   useEffect(() => {
@@ -489,6 +502,7 @@ export default function DatabasePage() {
                 drawings={
                   filteredDrawings
                 }
+                onOpen3D={setViewer3D}
                 onOpenPreview={(
                   drawing,
                 ) => {
@@ -530,6 +544,15 @@ export default function DatabasePage() {
             )
           }
           onOpenImage={setImageViewer}
+        />
+      )}
+
+      {viewer3D && (
+        <Viewer3DModal
+          drawing={viewer3D}
+          onClose={() =>
+            setViewer3D(undefined)
+          }
         />
       )}
 
@@ -766,9 +789,13 @@ function PartsTable({
 function DrawingsTable({
   drawings,
   onOpenPreview,
+  onOpen3D,
 }: {
   drawings: DrawingRecord[];
   onOpenPreview: (
+    drawing: DrawingRecord,
+  ) => void;
+  onOpen3D: (
     drawing: DrawingRecord,
   ) => void;
 }) {
@@ -905,6 +932,26 @@ function DrawingsTable({
               <td className="
                 px-5 py-4 text-right
               ">
+                <button
+                  type="button"
+                  onClick={() =>
+                    onOpen3D(drawing)
+                  }
+                  className="
+                    mr-2 inline-flex items-center
+                    gap-2 rounded-lg
+                    border border-zinc-700
+                    bg-zinc-950
+                    px-3 py-2 text-xs
+                    font-medium
+                    text-zinc-300
+                    hover:bg-zinc-800
+                  "
+                >
+                  <Box size={14} />
+                  Ver 3D
+                </button>
+
                 <button
                   type="button"
                   onClick={() =>
@@ -1399,6 +1446,123 @@ function SummaryCard({
         mt-1 text-xs text-zinc-500
       ">
         {label}
+      </div>
+    </div>
+  );
+}
+
+
+function Viewer3DModal({
+  drawing,
+  onClose,
+}: {
+  drawing: DrawingRecord;
+  onClose: () => void;
+}) {
+  const [model, setModel] =
+    useState<PartModelResponse>();
+  const [error, setError] =
+    useState<string>();
+
+  useEffect(() => {
+    getPartModel(drawing.id)
+      .then(setModel)
+      .catch((caught) =>
+        setError(
+          caught instanceof Error
+            ? caught.message
+            : "No fue posible cargar el modelo.",
+        ),
+      );
+  }, [drawing.id]);
+
+  return (
+    <div
+      onClick={onClose}
+      className="
+        fixed inset-0 z-[100]
+        grid place-items-center
+        bg-black/85 p-4
+        backdrop-blur-sm
+      "
+    >
+      <div
+        onClick={(event) =>
+          event.stopPropagation()
+        }
+        className="
+          flex max-h-[94vh]
+          w-full max-w-7xl
+          flex-col overflow-hidden
+          rounded-2xl border
+          border-zinc-700
+          bg-zinc-950 shadow-2xl
+        "
+      >
+        <div className="
+          flex items-center
+          justify-between
+          border-b border-zinc-800
+          px-4 py-3
+        ">
+          <div className="
+            flex items-center gap-2
+          ">
+            <Box
+              size={17}
+              className="text-emerald-400"
+            />
+            <span className="text-sm font-medium">
+              {`Modelo 3D · ${drawing.part_number} Rev. ${drawing.revision}`}
+            </span>
+          </div>
+
+          <button
+            type="button"
+            onClick={onClose}
+            className="
+              grid h-8 w-8
+              place-items-center
+              rounded-lg
+              text-zinc-400
+              hover:bg-zinc-800
+              hover:text-white
+            "
+          >
+            <X size={18} />
+          </button>
+        </div>
+
+        <div className="p-4">
+          {error ? (
+            <p className="text-sm text-red-300">
+              {error}
+            </p>
+          ) : !model ? (
+            <div className="grid h-[70vh] place-items-center">
+              <LoaderCircle
+                size={28}
+                className="animate-spin text-emerald-400"
+              />
+            </div>
+          ) : (
+            <Suspense
+              fallback={
+                <div className="grid h-[70vh] place-items-center">
+                  <LoaderCircle
+                    size={28}
+                    className="animate-spin text-emerald-400"
+                  />
+                </div>
+              }
+            >
+              <PartViewer3D
+                className="h-[72vh]"
+                model={model}
+              />
+            </Suspense>
+          )}
+        </div>
       </div>
     </div>
   );

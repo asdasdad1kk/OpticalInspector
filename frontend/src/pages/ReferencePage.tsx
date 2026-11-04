@@ -1,5 +1,6 @@
-import { useEffect, useMemo, useState } from "react";
+import { Suspense, lazy, useEffect, useMemo, useState } from "react";
 import {
+  Box,
   Camera,
   CheckCircle2,
   CircleStop,
@@ -24,6 +25,9 @@ import {
 import { useCameraStream } from "../hooks/useCameraStream";
 import CameraSelector, { loadCameraOptions } from "../components/CameraSelector";
 import ZoomableImage, { type ImageMarker } from "../components/ZoomableImage";
+
+// three.js pesa bastante: solo se descarga al abrir la vista 3D.
+const PartViewer3D = lazy(() => import("../components/PartViewer3D"));
 import { EDITABLE_TYPES, FEATURE_TYPES, typeLabel } from "../components/FeatureInfo";
 import type {
   CameraStatus,
@@ -66,6 +70,8 @@ export default function ReferencePage() {
   const [analysis, setAnalysis] = useState<ReferenceAnalysis>();
   const [analyzing, setAnalyzing] = useState(false);
   const [addMode, setAddMode] = useState(false);
+  const [view, setView] = useState<"2d" | "3d">("2d");
+  const [imageDims, setImageDims] = useState<{ width: number; height: number }>();
 
   const [partNo, setPartNo] = useState("");
   const [revision, setRevision] = useState("");
@@ -107,6 +113,7 @@ export default function ReferencePage() {
   }
 
   function resetAnalysis() {
+    setView("2d");
     setAnalysis(undefined);
     setCorrectedUrl(undefined);
     setSaved(undefined);
@@ -381,8 +388,23 @@ export default function ReferencePage() {
           </div>
 
           <div className="relative flex aspect-video items-center justify-center bg-black">
-            {photoUrl ? (
+            {photoUrl && analysis && view === "3d" ? (
+              <Suspense fallback={<LoaderCircle size={28} className="animate-spin text-emerald-400" />}>
+                <PartViewer3D
+                  fill
+                  model={{
+                    unit,
+                    contour: analysis.contour,
+                    features: analysis.features,
+                    texture: imageDims
+                      ? { url: correctedUrl ?? photoUrl, width: imageDims.width, height: imageDims.height, scale }
+                      : null,
+                  }}
+                />
+              </Suspense>
+            ) : photoUrl ? (
               <ZoomableImage
+                onLoad={setImageDims}
                 src={correctedUrl ?? photoUrl}
                 alt="Pieza patrón"
                 className="absolute inset-0"
@@ -458,6 +480,18 @@ export default function ReferencePage() {
                 </button>
               )}
               {analysis && (
+                <button
+                  type="button"
+                  className={`${buttonSecondary} ${view === "3d" ? "border-emerald-500/60 text-emerald-400" : ""}`}
+                  onClick={() => {
+                    setAddMode(false);
+                    setView((current) => (current === "3d" ? "2d" : "3d"));
+                  }}
+                >
+                  <Box size={16} /> {view === "3d" ? "Vista 2D" : "Vista 3D"}
+                </button>
+              )}
+              {analysis && view === "2d" && (
                 <button
                   type="button"
                   className={`${buttonSecondary} ${addMode ? "border-emerald-500/60 text-emerald-400" : ""}`}
