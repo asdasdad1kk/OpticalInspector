@@ -53,6 +53,7 @@ export default function ReferencePage() {
   const [source, setSource] = useState<Source>("camera");
   const [photo, setPhoto] = useState<File>();
   const [photoUrl, setPhotoUrl] = useState<string>();
+  const [correctedUrl, setCorrectedUrl] = useState<string>();
   const [imageSize, setImageSize] = useState<{ width: number; height: number }>();
 
   const [camera, setCamera] = useState<CameraStatus>();
@@ -106,6 +107,7 @@ export default function ReferencePage() {
 
   function resetAnalysis() {
     setAnalysis(undefined);
+    setCorrectedUrl(undefined);
     setSaved(undefined);
     setAddMode(false);
   }
@@ -141,9 +143,10 @@ export default function ReferencePage() {
       setError(undefined);
       setSaved(undefined);
       const length = Number(knownLength);
-      setAnalysis(
-        await analyzeReference(photo, Number.isFinite(length) && length > 0 ? length : undefined, knownAxis),
-      );
+      const result = await analyzeReference(photo, Number.isFinite(length) && length > 0 ? length : undefined, knownAxis);
+      // Con calibración, las coordenadas están en la imagen corregida.
+      setCorrectedUrl(result.image_jpeg ? `data:image/jpeg;base64,${result.image_jpeg}` : undefined);
+      setAnalysis(result);
     } catch (caught) {
       setError(message(caught, "No fue posible analizar la pieza."));
     } finally {
@@ -200,8 +203,9 @@ export default function ReferencePage() {
     try {
       setSaving(true);
       setError(undefined);
-      const { preview_png: _preview, ...reference } = analysis;
+      const { preview_png: _preview, image_jpeg: _image, ...reference } = analysis;
       void _preview;
+      void _image;
       setSaved(await saveReference({ photo, partNo, revision, description, reference }));
     } catch (caught) {
       setError(message(caught, "No fue posible guardar la pieza patrón."));
@@ -306,7 +310,7 @@ export default function ReferencePage() {
             {photoUrl ? (
               <div className="relative max-h-full max-w-full">
                 <img
-                  src={photoUrl}
+                  src={correctedUrl ?? photoUrl}
                   alt="Pieza patrón"
                   className="block max-h-[70vh] w-auto max-w-full"
                   onLoad={(event) =>
@@ -454,7 +458,7 @@ export default function ReferencePage() {
                 </div>
               </label>
               <p className="text-xs text-zinc-600">
-                Sin dimensión conocida las medidas quedan en píxeles (modo relativo).
+                Sin dimensión conocida se usa la escala medida en Configuración › Cámara (si existe); si no, las medidas quedan en píxeles.
               </p>
               <button type="button" className={`${buttonPrimary} w-full`} onClick={handleAnalyze} disabled={!photo || analyzing}>
                 {analyzing ? <LoaderCircle size={16} className="animate-spin" /> : <ScanSearch size={16} />}
@@ -497,7 +501,8 @@ export default function ReferencePage() {
                   </div>
                   <div>
                     <dt className="text-zinc-500">Escala</dt>
-                    <dd className="font-medium">{analysis.relative ? "relativa" : `${(1 / scale).toFixed(2)} px/mm`}</dd>
+                    <dd className="font-medium">{analysis.relative ? "relativa" : `${(1 / scale).toFixed(2)} px/mm`}
+                      {analysis.scale_source === "calibracion" ? " (calibración)" : ""}</dd>
                   </div>
                 </dl>
               </section>

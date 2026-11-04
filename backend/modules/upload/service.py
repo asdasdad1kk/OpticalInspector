@@ -899,6 +899,49 @@ def render_preview(
 # SERVICIO DE CARGA
 # ============================================================
 
+# Codigo $INSUNITS de AutoCAD -> milimetros por unidad.
+INSUNITS_TO_MM = {1: 25.4, 2: 304.8, 4: 1.0, 5: 10.0, 6: 1000.0, 13: 0.001, 14: 100.0}
+UNIT_NAME_TO_MM = {"mm": 1.0, "cm": 10.0, "m": 1000.0, "in": 25.4, "ft": 304.8}
+_MM_KEYS = ("center_x_mm", "center_y_mm", "outer_radius_mm", "roi_margin_mm",
+            "xmin_mm", "ymin_mm", "xmax_mm", "ymax_mm")
+
+
+def dxf_unit_factor(dxf_bytes: bytes) -> tuple[float, str]:
+    """Factor a mm segun $INSUNITS; si no esta declarada usa el ajuste del panel."""
+    from core.settings import settings_store  # import perezoso
+
+    temporary_path = ""
+    try:
+        with tempfile.NamedTemporaryFile(suffix=".dxf", delete=False) as handle:
+            handle.write(dxf_bytes)
+            temporary_path = handle.name
+        code = int(ezdxf.readfile(temporary_path).header.get("$INSUNITS", 0) or 0)
+    except Exception:
+        code = 0
+    finally:
+        if temporary_path and os.path.exists(temporary_path):
+            os.remove(temporary_path)
+    if code in INSUNITS_TO_MM:
+        return INSUNITS_TO_MM[code], f"INSUNITS={code}"
+    unit = settings_store.get()["dxf"]["default_unit"]
+    return UNIT_NAME_TO_MM[unit], f"sin unidad declarada; se asume {unit}"
+
+
+def scale_processed_to_mm(processed: dict[str, Any], factor: float) -> None:
+    """Convierte ROIs, limites y dimensiones del DXF a milimetros (in situ)."""
+    if factor == 1.0:
+        return
+    for roi in processed["rois"]:
+        for key in _MM_KEYS:
+            if key in roi:
+                roi[key] = round(float(roi[key]) * factor, 4)
+        if "circle_radii_mm" in roi:
+            roi["circle_radii_mm"] = [round(float(r) * factor, 4) for r in roi["circle_radii_mm"]]
+    processed["bounds"] = {k: float(v) * factor for k, v in processed["bounds"].items()}
+    processed["width_mm"] = float(processed["width_mm"]) * factor
+    processed["height_mm"] = float(processed["height_mm"]) * factor
+
+
 class UploadService:
     @staticmethod
     def process_dxf_bytes(dxf_bytes: bytes) -> dict[str, Any]:
@@ -1020,6 +1063,9 @@ class UploadService:
                 detail=f"Error procesando el DXF: {error}",
             ) from error
 
+        unit_factor, unit_note = dxf_unit_factor(dxf_bytes)
+        scale_processed_to_mm(processed, unit_factor)
+
         try:
             statement = select(Part).where(
                 Part.part_number == clean_part_no,
@@ -1051,6 +1097,9 @@ class UploadService:
                     "items": processed["rois"],
                     "bounds": processed["bounds"],
                     "summary": processed["summary"],
+                    # Los valores de arriba ya estan en mm; el DXF conserva sus unidades.
+                    "unit_factor": unit_factor,
+                    "unit_note": unit_note,
                 },
             )
 

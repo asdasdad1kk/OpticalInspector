@@ -9,6 +9,8 @@ from modules.camera.service import camera_service
 # Ajusta estos imports a tu estructura real.
 from models import Inspection,Part,Drawing
 from core.db import get_session
+from core.storage import inspection_image
+from .pipeline import InconclusiveError
 from .service import InspectService
 
 
@@ -179,9 +181,16 @@ async def inspect_capture(
             InspectService.process_inspection(
                 drawing=drawing,
                 photo_bytes=photo_bytes,
-                options=parse_options(options),
+                options=InspectService.resolve_options(session, drawing, parse_options(options)),
             )
         )
+
+    except InconclusiveError as error:
+
+        raise HTTPException(
+            status_code=422,
+            detail=f"NO CONCLUYENTE: {error}",
+        ) from error
 
     except ValueError as error:
 
@@ -206,44 +215,11 @@ async def inspect_capture(
 
     try:
 
-        inspection = Inspection(
-            drawing_id=drawing.id,
-            inspector=inspector,
-
-            original_image=photo_bytes,
-
-            rectified_image=processed[
-                "rectified_image"
-            ],
-
-            overlay_image=processed[
-                "overlay_image"
-            ],
-
-            score=processed[
-                "score"
-            ],
-
-            status=processed[
-                "status"
-            ],
-
-            results=processed[
-                "results"
-            ],
-        )
-
-        session.add(inspection)
-
-        session.commit()
-
-        session.refresh(
-            inspection
+        inspection = InspectService.persist_inspection(
+            session, drawing, inspector, photo_bytes, processed
         )
 
     except Exception as error:
-
-        session.rollback()
 
         raise HTTPException(
             status_code=500,
@@ -322,9 +298,13 @@ def get_original_image(
             detail="Inspection not found"
         )
 
+    content = inspection_image(inspection, "original")
+    if not content:
+        raise HTTPException(status_code=404, detail="Original image not available")
+
     return Response(
-        content=inspection.original_image,
-        media_type="image/jpeg"
+        content=content,
+        media_type="image/png" if content[:4] == b"\x89PNG" else "image/jpeg"
     )
 
 
@@ -344,14 +324,15 @@ def get_rectified_image(
             detail="Inspection not found"
         )
 
-    if not inspection.rectified_image:
+    content = inspection_image(inspection, "rectified")
+    if not content:
         raise HTTPException(
             status_code=404,
             detail="Rectified image not available"
         )
 
     return Response(
-        content=inspection.rectified_image,
+        content=content,
         media_type="image/png"
     )
 
@@ -372,13 +353,14 @@ def get_overlay_image(
             detail="Inspection not found"
         )
 
-    if not inspection.overlay_image:
+    content = inspection_image(inspection, "overlay")
+    if not content:
         raise HTTPException(
             status_code=404,
             detail="Overlay image not available"
         )
 
     return Response(
-        content=inspection.overlay_image,
+        content=content,
         media_type="image/png"
     )

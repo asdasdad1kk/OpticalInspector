@@ -215,6 +215,7 @@ def analyze_reference(
     image: np.ndarray,
     known_length: float | None = None,
     known_axis: str = "long",
+    plane_mm_per_px: float | None = None,
 ) -> dict[str, Any]:
     """Devuelve la referencia completa en unidades reales (mm) y un preview.
 
@@ -247,8 +248,16 @@ def analyze_reference(
     long_px = max(rect[1])
     short_px = min(rect[1])
     reference_px = long_px if known_axis == "long" else short_px
-    relative = not known_length
-    scale = (float(known_length) / reference_px) if known_length and reference_px > 0 else 1.0
+    scale_source = "dimension"
+    if known_length and reference_px > 0:
+        scale = float(known_length) / reference_px
+    elif plane_mm_per_px:
+        scale = float(plane_mm_per_px)  # tablero medido en el plano de la pieza
+        scale_source = "calibracion"
+    else:
+        scale = 1.0
+        scale_source = "relativa"
+    relative = scale_source == "relativa"
 
     # Orden estable: filas (arriba->abajo) y columnas (izq->der).
     raw_features.sort(key=lambda f: (round(f["y_px"] / (0.08 * height)), f["x_px"]))
@@ -303,6 +312,7 @@ def analyze_reference(
         "dimensions": dimensions,
         "scale": scale,
         "relative": relative,
+        "scale_source": scale_source,
         "preview": preview,
         "enabled": dict(DEFAULT_ENABLED),
     }
@@ -374,6 +384,14 @@ def check_contour(
     unit = golden["dimensions"].get("unit", "mm")
 
     tolerance_pct = float(options.get("dimension_tolerance_pct", 1.5))
+    # Con 3+ piezas buenas se usa la media y la dispersion real (3 sigmas).
+    samples = golden.get("dim_samples") or []
+    if len(samples) >= 3:
+        longs = np.array([sample[0] for sample in samples], dtype=float)
+        shorts = np.array([sample[1] for sample in samples], dtype=float)
+        expected_long, expected_short = float(longs.mean()), float(shorts.mean())
+        spread_pct = max(longs.std(ddof=1) / expected_long, shorts.std(ddof=1) / expected_short) * 100.0
+        tolerance_pct = max(tolerance_pct, 3.0 * spread_pct)
     ranks: list[int] = []
     reasons: list[str] = []
     errors = {}

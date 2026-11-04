@@ -1,0 +1,64 @@
+"""Rutas y parametros de arranque, leidos de un archivo .env.
+
+Todas las rutas de archivos salen de aqui, de modo que se puedan mover a un
+servidor de archivos dedicado (por ejemplo una ruta UNC) cambiando solo el
+.env. Las rutas relativas se resuelven contra la carpeta del programa.
+"""
+from __future__ import annotations
+
+import os
+import sys
+from pathlib import Path
+
+from dotenv import load_dotenv
+from sqlalchemy.engine import URL
+
+if getattr(sys, "frozen", False):
+    BASE_DIR = Path(sys.executable).resolve().parent
+else:
+    BASE_DIR = Path(__file__).resolve().parent.parent
+
+load_dotenv(BASE_DIR / ".env")
+
+
+def _path(name: str, default: Path) -> Path:
+    raw = (os.getenv(name) or "").strip().strip('"')
+    path = Path(raw).expanduser() if raw else default
+    return path if path.is_absolute() or str(path).startswith("\\\\") else BASE_DIR / path
+
+
+DATA_DIR = _path("OI_DATA_DIR", BASE_DIR)
+DB_PATH = _path("OI_DB_PATH", DATA_DIR / "optical_inspector.db")
+IMAGES_DIR = _path("OI_IMAGES_DIR", DATA_DIR / "storage" / "inspections")
+GOLDEN_DIR = _path("OI_GOLDEN_DIR", DATA_DIR / "storage" / "golden")
+VALIDATION_DIR = _path("OI_VALIDATION_DIR", DATA_DIR / "storage" / "validation")
+CALIBRATION_DIR = _path("OI_CALIBRATION_DIR", DATA_DIR / "storage" / "calibration")
+BACKUP_DIR = _path("OI_BACKUP_DIR", DATA_DIR / "backups")
+LOG_DIR = _path("OI_LOG_DIR", DATA_DIR / "logs")
+SETTINGS_FILE = _path("OI_SETTINGS_FILE", DATA_DIR / "settings.json")
+
+HOST = (os.getenv("OI_HOST") or "127.0.0.1").strip()
+PORT = int(os.getenv("OI_PORT") or 8000)
+INITIAL_PASSWORD = os.getenv("OI_CONFIG_PASSWORD") or ""
+
+DATABASE_URL = URL.create("sqlite", database=str(DB_PATH))
+
+PATHS = {
+    "OI_DATA_DIR": DATA_DIR,
+    "OI_DB_PATH": DB_PATH,
+    "OI_IMAGES_DIR": IMAGES_DIR,
+    "OI_GOLDEN_DIR": GOLDEN_DIR,
+    "OI_VALIDATION_DIR": VALIDATION_DIR,
+    "OI_CALIBRATION_DIR": CALIBRATION_DIR,
+    "OI_BACKUP_DIR": BACKUP_DIR,
+    "OI_LOG_DIR": LOG_DIR,
+    "OI_SETTINGS_FILE": SETTINGS_FILE,
+}
+
+
+def ensure_dirs() -> None:
+    for directory in (
+        DATA_DIR, DB_PATH.parent, IMAGES_DIR, GOLDEN_DIR, VALIDATION_DIR,
+        CALIBRATION_DIR, BACKUP_DIR, LOG_DIR, SETTINGS_FILE.parent,
+    ):
+        directory.mkdir(parents=True, exist_ok=True)

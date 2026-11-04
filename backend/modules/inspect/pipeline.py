@@ -32,7 +32,41 @@ DEFAULT_OPTIONS: dict[str, Any] = {
     "min_presence": 0.30,
     "dimension_tolerance_pct": 1.5,  # contorno (pieza real)
     "distance_tolerance_pct": 1.5,   # distancias entre features (pieza real)
+    # Compuertas de calidad: si no se cumplen el resultado es NO CONCLUYENTE.
+    "min_inlier_fraction": 0.6,
+    "min_sharpness": 25.0,
+    "min_brightness": 40.0,
+    "max_brightness": 215.0,
+    "max_clipped_fraction": 0.15,
 }
+
+
+class InconclusiveError(ValueError):
+    """La imagen no permite decidir; hay que repetir la captura."""
+
+
+def check_image_quality(image: np.ndarray, options: dict[str, Any]) -> dict[str, float]:
+    """Nitidez y exposicion. Lanza InconclusiveError si no son aptas."""
+    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+    if gray.shape[1] > 1024:
+        factor = 1024.0 / gray.shape[1]
+        gray = cv2.resize(gray, None, fx=factor, fy=factor, interpolation=cv2.INTER_AREA)
+    sharpness = float(cv2.Laplacian(gray, cv2.CV_64F).var())
+    brightness = float(gray.mean())
+    clipped = float(np.mean((gray >= 250) | (gray <= 5)))
+    if brightness < options["min_brightness"]:
+        raise InconclusiveError(f"Imagen muy oscura (brillo {brightness:.0f}). Revise la iluminacion.")
+    if brightness > options["max_brightness"]:
+        raise InconclusiveError(f"Imagen sobreexpuesta (brillo {brightness:.0f}). Reduzca la exposicion.")
+    if sharpness < options["min_sharpness"]:
+        raise InconclusiveError(
+            f"Imagen desenfocada (nitidez {sharpness:.0f} < {options['min_sharpness']:.0f}). Revise el enfoque."
+        )
+    if clipped > options["max_clipped_fraction"]:
+        raise InconclusiveError(
+            f"Demasiados pixeles saturados ({clipped * 100:.0f}%). Reduzca reflejos o exposicion."
+        )
+    return {"sharpness": round(sharpness, 1), "brightness": round(brightness, 1), "clipped": round(clipped, 4)}
 
 TYPE_BRASS = {"DELRON_CONICO", "DELRON_PLANO"}
 
@@ -252,10 +286,15 @@ def evaluate_feature(
     score_parts: list[float] = [presence * 100.0]
     status_rank = 0  # 0 OK, 1 REVISAR, 2 FALLO
 
+    # Con varias piezas buenas, la tolerancia nunca baja de 3 / 5 sigmas observadas.
+    sigma_radii = float(item.get("pos_std") or 0.0) * scale / radius_px
+    ok_limit = max(options["position_ok_radii"], 3.0 * sigma_radii)
+    review_limit = max(options["position_review_radii"], 5.0 * sigma_radii)
+
     if options["check_position"]:
-        if deviation_radii <= options["position_ok_radii"]:
+        if deviation_radii <= ok_limit:
             checks["position"] = "OK"
-        elif deviation_radii <= options["position_review_radii"]:
+        elif deviation_radii <= review_limit:
             checks["position"] = "REVISAR"
             status_rank = max(status_rank, 1)
             reasons.append(f"Posicion desviada {deviation_units:.3f}.")
@@ -264,7 +303,7 @@ def evaluate_feature(
             status_rank = 2
             reasons.append(f"Posicion fuera de tolerancia ({deviation_units:.3f}).")
         score_parts.append(
-            float(np.clip(1.0 - deviation_radii / (options["position_review_radii"] * 1.2), 0.0, 1.0)) * 100.0
+            float(np.clip(1.0 - deviation_radii / (review_limit * 1.2), 0.0, 1.0)) * 100.0
         )
 
     color = classify_color(
@@ -442,16 +481,35 @@ def run_pipeline(
             "Se necesitan al menos 4 features activos para alinear la pieza con la referencia."
         )
 
+    quality = check_image_quality(image, options)
     image_height, image_width = image.shape[:2]
     ref_points = np.float64([[item["x"], -item["y"]] for item in items])
     candidates = detect_blob_candidates(image)
     extent = (bounds[1] - bounds[0], bounds[3] - bounds[2])
     registration = register(ref_points, candidates, (image_width, image_height), extent)
     if registration is None or registration["inliers"] < 4:
-        raise ValueError(
+        raise InconclusiveError(
             "No fue posible alinear la pieza: se detectaron muy pocos features "
             "coincidentes con la referencia. Verifique encuadre, enfoque e iluminacion."
         )
+    inlier_fraction = registration["inliers"] / len(items)
+    if inlier_fraction < options["min_inlier_fraction"]:
+        raise InconclusiveError(
+            f"Alineacion poco confiable: solo {registration['inliers']} de {len(items)} features "
+            f"coinciden ({inlier_fraction * 100:.0f}% < {options['min_inlier_fraction'] * 100:.0f}%). "
+            "Puede ser un encuadre incorrecto o una pieza distinta a la dada de alta."
+        )
+    panel_corners = np.float64([
+        [bounds[0], -bounds[3]], [bounds[1], -bounds[3]], [bounds[1], -bounds[2]], [bounds[0], -bounds[2]],
+    ])
+    projected_corners = _apply(registration["matrix"], panel_corners)
+    margin = 0.005 * image_width
+    if (
+        projected_corners[:, 0].min() < -margin or projected_corners[:, 1].min() < -margin
+        or projected_corners[:, 0].max() > image_width + margin
+        or projected_corners[:, 1].max() > image_height + margin
+    ):
+        raise InconclusiveError("La pieza no cabe completa en el encuadre. Centre la pieza o aleje la camara.")
 
     canvas = build_canvas(bounds)
     # canvas <- imagen: canvas_from_ref * ref_from_image(inv(H))
@@ -515,7 +573,9 @@ def run_pipeline(
         "alignment": {
             "method": registration["method"],
             "inliers": registration["inliers"],
+            "inlier_fraction": round(inlier_fraction, 3),
             "matches": matches,
+            "quality": quality,
         },
         "canvas": canvas,
         "options": options,

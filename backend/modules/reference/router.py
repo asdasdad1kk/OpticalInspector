@@ -12,7 +12,8 @@ from sqlmodel import Session, select
 from core.db import get_session
 from models import Drawing, Part
 from modules.inspect.golden import DEFAULT_ENABLED, analyze_reference, draw_reference_preview
-from modules.inspect.service import decode_image, encode_png
+from modules.inspect.calibration import calibration_service
+from modules.inspect.service import decode_image, encode_png, prepare_image
 
 
 router = APIRouter(
@@ -31,6 +32,7 @@ def _serialize(analysis: dict[str, Any]) -> dict[str, Any]:
         "scale": analysis["scale"],
         "relative": analysis["relative"],
         "enabled": analysis["enabled"],
+        "scale_source": analysis.get("scale_source", "dimension"),
         "preview_png": base64.b64encode(encode_png(analysis["preview"])).decode("ascii"),
     }
 
@@ -56,13 +58,23 @@ async def analyze(
         raise HTTPException(status_code=422, detail="known_length debe ser mayor que cero.")
 
     try:
-        image = decode_image(data)
-        analysis = analyze_reference(image, known_length, known_axis)
+        raw = decode_image(data)
+        image = calibration_service.undistort(raw)
+        undistorted = image is not raw
+        plane_scale = None
+        if not known_length:
+            plane_scale = calibration_service.plane_scale_for((image.shape[1], image.shape[0]))
+        analysis = analyze_reference(image, known_length, known_axis, plane_scale)
     except ValueError as error:
         raise HTTPException(status_code=400, detail=str(error)) from error
     except Exception as error:
         raise HTTPException(status_code=500, detail=f"Error analizando la pieza: {error}") from error
-    return _serialize(analysis)
+    payload = _serialize(analysis)
+    if undistorted:
+        # Las coordenadas estan en la imagen corregida: el cliente debe mostrarla.
+        ok, encoded = cv2.imencode(".jpg", image, [cv2.IMWRITE_JPEG_QUALITY, 92])
+        payload["image_jpeg"] = base64.b64encode(encoded.tobytes()).decode("ascii") if ok else None
+    return payload
 
 
 @router.post("/save", status_code=status.HTTP_201_CREATED)
@@ -95,7 +107,7 @@ async def save(
 
     photo_bytes = await photo.read()
     try:
-        image = decode_image(photo_bytes)
+        image = prepare_image(photo_bytes)
     except ValueError as error:
         raise HTTPException(status_code=400, detail=str(error)) from error
 

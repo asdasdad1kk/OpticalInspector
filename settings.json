@@ -1,0 +1,43 @@
+{
+  "inspection": {
+    "position_ok_radii": 0.45,
+    "position_review_radii": 0.9,
+    "diameter_review_ratio": 0.35,
+    "brass_saturation": 60,
+    "min_presence": 0.3,
+    "dimension_tolerance_pct": 1.5,
+    "distance_tolerance_pct": 1.5,
+    "min_inlier_fraction": 0.6,
+    "min_sharpness": 25,
+    "min_brightness": 40,
+    "max_brightness": 215,
+    "max_clipped_fraction": 0.15,
+    "check_position": true,
+    "check_type": true,
+    "check_diameter": true,
+    "check_edges": true
+  },
+  "camera": {
+    "lock_enabled": false,
+    "exposure": -6,
+    "wb_temperature": 4600,
+    "autofocus": false,
+    "focus": 0
+  },
+  "calibration": {
+    "apply": true,
+    "square_mm": 30.0
+  },
+  "dxf": {
+    "default_unit": "mm"
+  },
+  "backup": {
+    "enabled": true,
+    "keep": 14,
+    "interval_hours": 24
+  },
+  "parts": {},
+  "password_salt": "812441e892c65e7574f9aa06e01a3378",
+  "password_hash": "d2a523fdfc4daf5a88c8d4a1959c62a7c67c6b08c24cd3a9bc49efd60ead32a4",
+  "password_is_default": true
+}

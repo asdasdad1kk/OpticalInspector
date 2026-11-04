@@ -2,3 +2,9 @@
 **/node_modules
 **/dist
 **/build
+# Datos locales de ejecucion (rutas configurables en backend/.env)
+backend/.env
+backend/settings.json
+backend/storage/
+backend/backups/
+backend/logs/

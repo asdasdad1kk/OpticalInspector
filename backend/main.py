@@ -20,11 +20,14 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from PIL import Image, ImageDraw
 
+from core import config as app_config
 from core.db import create_database
+from core.runtime import setup_logging, start_backup_scheduler, stop_backup_scheduler
 
 from modules.camera.router import router as camera_router
 from modules.camera.service import camera_service
 from modules.database.router import router as database_router
+from modules.config.router import router as config_router
 from modules.inspect.router import router as inspect_router
 from modules.reference.router import router as reference_router
 from modules.upload.router import router as upload_router
@@ -44,10 +47,12 @@ if getattr(sys, "frozen", False):
 # ============================================================
 
 APP_NAME = "Optical Inspector"
-APP_HOST = "127.0.0.1"
-APP_PORT = 8000
+APP_HOST = app_config.HOST          # OI_HOST en el .env
+APP_PORT = app_config.PORT          # OI_PORT en el .env
 
-APP_HOME_URL = f"http://{APP_HOST}:{APP_PORT}/inspect"
+# Una IP 0.0.0.0 no sirve para abrir el navegador local.
+BROWSER_HOST = "127.0.0.1" if APP_HOST in ("0.0.0.0", "::") else APP_HOST
+APP_HOME_URL = f"http://{BROWSER_HOST}:{APP_PORT}/inspect"
 
 
 # ============================================================
@@ -96,10 +101,13 @@ closing = False
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    setup_logging()
     create_database()
+    start_backup_scheduler()
 
     yield
 
+    stop_backup_scheduler()
     try:
         camera_service.stop()
     except Exception:
@@ -150,6 +158,11 @@ app.include_router(
 
 app.include_router(
     reference_router,
+    prefix="/api",
+)
+
+app.include_router(
+    config_router,
     prefix="/api",
 )
 

@@ -14,7 +14,13 @@ from sqlmodel import Session
 # Ajusta este import a tu estructura real.
 from models import Drawing, Inspection
 
-from .pipeline import run_pipeline
+from core import config
+from core import storage
+from core.settings import settings_store
+from models import Part
+
+from .calibration import calibration_service
+from .pipeline import InconclusiveError, run_pipeline
 
 
 # ============================================================
@@ -64,6 +70,11 @@ def decode_image(image_bytes: bytes) -> np.ndarray:
     if image is None:
         raise ValueError("OpenCV no pudo leer la imagen recibida.")
     return image
+
+
+def prepare_image(image_bytes: bytes) -> np.ndarray:
+    """Decodifica y corrige la distorsion del lente si hay calibracion."""
+    return calibration_service.undistort(decode_image(image_bytes))
 
 
 def order_points(points: np.ndarray) -> np.ndarray:
@@ -1335,7 +1346,7 @@ class InspectService:
         if not drawing.dxf_file:
             raise ValueError("El drawing no contiene el DXF guardado.")
 
-        image = decode_image(photo_bytes)
+        image = prepare_image(photo_bytes)
 
         bounds = roi_data.get("bounds") or {}
         temporary_path = ""
@@ -1344,13 +1355,16 @@ class InspectService:
             document, temporary_path = open_dxf_from_bytes(drawing.dxf_file)
             modelspace = document.modelspace()
 
+            # Los ROIs estan en mm; el DXF conserva sus unidades originales.
+            unit_factor = float(roi_data.get("unit_factor", 1.0)) or 1.0
+
             if all(key in bounds for key in ("xmin", "xmax", "ymin", "ymax")):
                 xmin = float(bounds["xmin"])
                 xmax = float(bounds["xmax"])
                 ymin = float(bounds["ymin"])
                 ymax = float(bounds["ymax"])
             else:
-                xmin, xmax, ymin, ymax = get_dxf_bounds(modelspace)
+                xmin, xmax, ymin, ymax = (v * unit_factor for v in get_dxf_bounds(modelspace))
 
             if xmax - xmin <= 0 or ymax - ymin <= 0:
                 raise ValueError("Las dimensiones CAD no son validas.")
@@ -1372,7 +1386,8 @@ class InspectService:
             def build_template(canvas: dict[str, Any]) -> np.ndarray:
                 c_xmin, c_xmax, c_ymin, c_ymax = canvas["bounds"]
                 return draw_dxf_template(
-                    modelspace, c_xmin, c_xmax, c_ymin, c_ymax,
+                    modelspace, c_xmin / unit_factor, c_xmax / unit_factor,
+                    c_ymin / unit_factor, c_ymax / unit_factor,
                     canvas["width"], canvas["height"],
                 )
 
@@ -1408,6 +1423,60 @@ class InspectService:
                 os.remove(temporary_path)
 
     @staticmethod
+    def resolve_options(
+        session: Session,
+        drawing: Drawing,
+        request_options: dict[str, Any] | None,
+    ) -> dict[str, Any]:
+        """Defaults del panel < ajustes de la pieza < opciones de la peticion."""
+        part = session.get(Part, drawing.part_id)
+        options = settings_store.inspection_options(part.part_number if part else None)
+        for key, value in (request_options or {}).items():
+            if key == "categories" or key in options:
+                options[key] = value
+        return options
+
+    @staticmethod
+    def persist_inspection(
+        session: Session,
+        drawing: Drawing,
+        inspector: str,
+        photo_bytes: bytes,
+        processed: dict[str, Any],
+    ) -> Inspection:
+        """Guarda las imagenes en disco y el registro en la base."""
+        saved: list[str] = []
+        try:
+            original = storage.save_bytes(config.IMAGES_DIR, photo_bytes, "original", ".jpg")
+            saved.append(original)
+            rectified = storage.save_bytes(config.IMAGES_DIR, processed["rectified_image"], "rectified", ".png")
+            saved.append(rectified)
+            overlay = storage.save_bytes(config.IMAGES_DIR, processed["overlay_image"], "overlay", ".png")
+            saved.append(overlay)
+            inspection = Inspection(
+                drawing_id=drawing.id,
+                inspector=inspector,
+                original_image=b"",
+                rectified_image=b"",
+                overlay_image=b"",
+                original_path=original,
+                rectified_path=rectified,
+                overlay_path=overlay,
+                score=processed["score"],
+                status=processed["status"],
+                results=processed["results"],
+            )
+            session.add(inspection)
+            session.commit()
+            session.refresh(inspection)
+            return inspection
+        except Exception:
+            session.rollback()
+            for relative in saved:
+                storage.delete(config.IMAGES_DIR, relative)
+            raise
+
+    @staticmethod
     def _process_golden(
         roi_data: dict[str, Any],
         photo_bytes: bytes,
@@ -1420,7 +1489,7 @@ class InspectService:
         if isinstance(categories, dict):
             golden["enabled"] = {**(golden.get("enabled") or {}), **categories}
         bounds = roi_data["bounds"]
-        image = decode_image(photo_bytes)
+        image = prepare_image(photo_bytes)
         items = [
             {
                 "id": item["id"],
@@ -1480,7 +1549,11 @@ class InspectService:
             raise HTTPException(status_code=400, detail="La imagen esta vacia.")
 
         try:
-            processed = InspectService.process_inspection(drawing, photo_bytes, options)
+            processed = InspectService.process_inspection(
+                drawing, photo_bytes, InspectService.resolve_options(session, drawing, options)
+            )
+        except InconclusiveError as error:
+            raise HTTPException(status_code=422, detail=f"NO CONCLUYENTE: {error}") from error
         except ValueError as error:
             raise HTTPException(status_code=400, detail=str(error)) from error
         except Exception as error:
@@ -1490,24 +1563,10 @@ class InspectService:
             ) from error
 
         try:
-            inspection = Inspection(
-                drawing_id=drawing.id,
-                inspector=clean_inspector,
-                original_image=photo_bytes,
-                rectified_image=processed["rectified_image"],
-                # Tu modelo solo tiene un campo overlay_image. Aqui se guarda
-                # la imagen final con rectangulos, etiquetas y resultados.
-                overlay_image=processed["overlay_image"],
-                score=processed["score"],
-                status=processed["status"],
-                results=processed["results"],
+            return InspectService.persist_inspection(
+                session, drawing, clean_inspector, photo_bytes, processed
             )
-            session.add(inspection)
-            session.commit()
-            session.refresh(inspection)
-            return inspection
         except Exception as error:
-            session.rollback()
             raise HTTPException(
                 status_code=500,
                 detail=f"Error guardando la inspeccion: {error}",

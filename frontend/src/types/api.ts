@@ -162,4 +162,6 @@ export interface ReferenceAnalysis {
   relative: boolean;
   enabled: ReferenceCategories;
   preview_png: string;
+  scale_source?: "dimension" | "calibracion" | "relativa";
+  image_jpeg?: string | null;
 }

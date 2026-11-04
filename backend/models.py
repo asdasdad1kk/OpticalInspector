@@ -88,6 +88,14 @@ class Inspection(SQLModel, table=True):
 
     overlay_image: Optional[bytes] = None
 
+    # Desde la version con almacenamiento en disco los archivos viven en
+    # OI_IMAGES_DIR; los BLOB de arriba quedan solo para registros antiguos.
+    original_path: Optional[str] = None
+
+    rectified_path: Optional[str] = None
+
+    overlay_path: Optional[str] = None
+
     score: float = 0
 
     status: str = "pending"

@@ -15,6 +15,19 @@ except ImportError:  # pragma: no cover
 
 PROVIDERS = ("realsense", "brio")
 
+try:  # el sondeo de indices genera avisos ruidosos de DirectShow
+    cv2.utils.logging.setLogLevel(cv2.utils.logging.LOG_LEVEL_ERROR)
+except AttributeError:  # pragma: no cover
+    pass
+
+
+def _lock_settings() -> dict | None:
+    """Parametros fijos configurados en el panel (None si no estan activos)."""
+    from core.settings import settings_store
+
+    camera = settings_store.get()["camera"]
+    return camera if camera.get("lock_enabled") else None
+
 
 @dataclass(frozen=True)
 class CameraFrame:
@@ -135,6 +148,21 @@ class CameraService:
         self._pipeline = pipeline
         self._config = config
         self._profile = profile
+        self._lock_realsense(profile)
+
+    @staticmethod
+    def _lock_realsense(profile: Any) -> None:
+        lock = _lock_settings()
+        if not lock:
+            return
+        try:
+            sensor = profile.get_device().first_color_sensor()
+            sensor.set_option(rs.option.enable_auto_exposure, 0)
+            sensor.set_option(rs.option.exposure, max(1.0, 2.0 ** float(lock["exposure"]) * 1_000_000.0))
+            sensor.set_option(rs.option.enable_auto_white_balance, 0)
+            sensor.set_option(rs.option.white_balance, float(lock["wb_temperature"]))
+        except Exception:
+            pass  # no todos los modelos exponen estas opciones
 
     def _open_brio(self) -> None:
         # DirectShow + MJPG: la BRIO solo entrega 1080p/4K a 30 fps en MJPG.
@@ -150,7 +178,19 @@ class CameraService:
         capture.set(cv2.CAP_PROP_FRAME_HEIGHT, self._height)
         capture.set(cv2.CAP_PROP_FPS, self._fps)
         capture.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-        capture.set(cv2.CAP_PROP_AUTOFOCUS, 1)
+
+        lock = _lock_settings()
+        if lock:
+            # DirectShow: 0.25 = exposicion manual, 0.75 = automatica.
+            capture.set(cv2.CAP_PROP_AUTO_EXPOSURE, 0.25)
+            capture.set(cv2.CAP_PROP_EXPOSURE, float(lock["exposure"]))
+            capture.set(cv2.CAP_PROP_AUTO_WB, 0)
+            capture.set(cv2.CAP_PROP_WB_TEMPERATURE, float(lock["wb_temperature"]))
+            capture.set(cv2.CAP_PROP_AUTOFOCUS, 1 if lock["autofocus"] else 0)
+            if not lock["autofocus"]:
+                capture.set(cv2.CAP_PROP_FOCUS, float(lock["focus"]))
+        else:
+            capture.set(cv2.CAP_PROP_AUTOFOCUS, 1)
 
         ok, frame = capture.read()
         if not ok or frame is None:
