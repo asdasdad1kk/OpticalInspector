@@ -19,6 +19,11 @@ import numpy as np
 # DETECCION DE CANDIDATOS
 # ============================================================
 
+# Giro maximo de la pieza respecto a la pieza patron: 180 = cualquier orientacion sobre la mesa.
+# Bajarlo (p. ej. 35) hace el alineamiento mas estricto y evita falsos emparejamientos en piezas simetricas.
+MAX_ROTATION_DEG = 180.0
+
+
 def detect_blob_candidates(
     image: np.ndarray,
     max_candidates: int = 70,
@@ -93,7 +98,7 @@ def find_similarity_ransac(
     candidates: np.ndarray,
     scale_range: tuple[float, float],
     tolerance: float,
-    max_rotation_deg: float = 35.0,
+    max_rotation_deg: float = MAX_ROTATION_DEG,
     allow_flip_180: bool = True,
 ) -> tuple[np.ndarray | None, int]:
     """Busca la similitud (2x3) reference->imagen con mas coincidencias."""

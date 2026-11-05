@@ -34,6 +34,8 @@ DEFAULT_OPTIONS: dict[str, Any] = {
     "distance_tolerance_pct": 1.5,   # distancias entre features (pieza real)
     # Compuertas de calidad: si no se cumplen el resultado es NO CONCLUYENTE.
     "min_inlier_fraction": 0.6,
+    "min_visible_fraction": 0.97,    # fraccion minima de la silueta que debe verse en la foto
+    "frame_margin": 0.005,           # tolerancia (fraccion del ancho) para features pegados al borde
     "min_sharpness": 25.0,
     "min_brightness": 40.0,
     "max_brightness": 215.0,
@@ -43,6 +45,50 @@ DEFAULT_OPTIONS: dict[str, Any] = {
 
 class InconclusiveError(ValueError):
     """La imagen no permite decidir; hay que repetir la captura."""
+
+
+def check_fits_frame(
+    matrix: np.ndarray,
+    items: list[dict[str, Any]],
+    anchor_index: list[int],
+    bounds: tuple[float, float, float, float],
+    golden: dict[str, Any] | None,
+    image_size: tuple[int, int],
+    options: dict[str, Any],
+) -> None:
+    """La pieza debe verse completa, sea cual sea su posicion o giro en la mesa.
+
+    Se evalua la silueta real de la pieza (no la caja que la envuelve, que en una pieza girada
+    cae fuera de la foto aunque la pieza se vea entera): todos los features deben quedar dentro
+    del encuadre y la silueta proyectada debe quedar casi toda dentro (`min_visible_fraction`).
+    """
+    image_width, image_height = image_size
+    margin = options["frame_margin"] * image_width
+    low, high = np.array([-margin, -margin]), np.array([image_width + margin, image_height + margin])
+    points = _apply(matrix, np.float64([[items[i]["x"], -items[i]["y"]] for i in anchor_index]))
+    if np.any(points < low) or np.any(points > high):
+        raise InconclusiveError("La pieza no cabe completa en el encuadre. Centre la pieza o aleje la camara.")
+
+    contour = (golden or {}).get("contour")
+    if contour and len(contour) >= 3:
+        polygon = _apply(matrix, np.float64([[x, -y] for x, y in contour]))
+    else:
+        polygon = _apply(matrix, np.float64([
+            [bounds[0], -bounds[3]], [bounds[1], -bounds[3]], [bounds[1], -bounds[2]], [bounds[0], -bounds[2]],
+        ]))
+    # Mascara de la silueta con un lienzo mayor que la foto: lo que sale del encuadre se mide.
+    pad = int(0.5 * max(image_width, image_height))
+    shifted = (polygon + pad).astype(np.int32)
+    if shifted.min() < 0 or shifted.max() > 32000:
+        raise InconclusiveError("La pieza no cabe completa en el encuadre. Centre la pieza o aleje la camara.")
+    total = np.zeros((int(image_height + 2 * pad), int(image_width + 2 * pad)), np.uint8)
+    cv2.fillPoly(total, [shifted], 1)
+    visible = float(total[pad:pad + image_height, pad:pad + image_width].sum()) / max(float(total.sum()), 1.0)
+    if visible < options["min_visible_fraction"]:
+        raise InconclusiveError(
+            f"La pieza no cabe completa en el encuadre (se ve el {visible * 100:.0f}%). "
+            "Centre la pieza o aleje la camara."
+        )
 
 
 def check_image_quality(image: np.ndarray, options: dict[str, Any]) -> dict[str, float]:
@@ -893,17 +939,7 @@ def run_pipeline(
             f"coinciden ({inlier_fraction * 100:.0f}% < {options['min_inlier_fraction'] * 100:.0f}%). "
             "Puede ser un encuadre incorrecto o una pieza distinta a la dada de alta."
         )
-    panel_corners = np.float64([
-        [bounds[0], -bounds[3]], [bounds[1], -bounds[3]], [bounds[1], -bounds[2]], [bounds[0], -bounds[2]],
-    ])
-    projected_corners = _apply(registration["matrix"], panel_corners)
-    margin = 0.005 * image_width
-    if (
-        projected_corners[:, 0].min() < -margin or projected_corners[:, 1].min() < -margin
-        or projected_corners[:, 0].max() > image_width + margin
-        or projected_corners[:, 1].max() > image_height + margin
-    ):
-        raise InconclusiveError("La pieza no cabe completa en el encuadre. Centre la pieza o aleje la camara.")
+    check_fits_frame(registration["matrix"], items, anchor_index, bounds, golden, (image_width, image_height), options)
 
     canvas = build_canvas(bounds)
     # canvas <- imagen: canvas_from_ref * ref_from_image(inv(H))

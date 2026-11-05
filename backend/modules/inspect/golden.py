@@ -340,6 +340,54 @@ def _plate_features(image: np.ndarray, features: list[dict[str, Any]]) -> list[d
     return good if len(good) >= 4 else features
 
 
+# Un pixel se descarta del contorno si su color (a, b de Lab) se aleja de la placa mas que esto,
+# medido en desviaciones robustas del color de la placa (con un piso para placas casi neutras).
+# Solidez (area / area del casco) desde la cual el contorno se sustituye por su casco convexo.
+HULL_MIN_SOLIDITY = 0.88
+OFF_COLOR_SIGMAS = 3.0
+OFF_COLOR_MIN_DISTANCE = 4.5
+
+
+def _drop_off_color(
+    small: np.ndarray, segmented: np.ndarray, points: np.ndarray, radii: np.ndarray
+) -> np.ndarray:
+    """Quita de la segmentacion lo que no tiene el color de la placa (madera, mesa de color).
+
+    GrabCut parte de una caja convexa de features y, en piezas con esquinas cortadas, arrastra
+    pedazos de mesa. El color de la placa se muestrea en el anillo alrededor de cada feature
+    (placa segura). Solo se usa el croma (a, b): el brillo cambia mucho con los reflejos, y una
+    mesa gris sobre placa gris no se toca aqui (la resuelve GrabCut).
+    """
+    sh, sw = small.shape[:2]
+    lab = cv2.cvtColor(cv2.GaussianBlur(small, (0, 0), 1.2), cv2.COLOR_BGR2LAB).astype(np.float32)
+    ring = np.zeros((sh, sw), np.uint8)
+    for (x, y), radius in zip(points, radii):
+        cv2.circle(ring, (int(x), int(y)), int(2.6 * radius) + 2, 255, -1)
+        cv2.circle(ring, (int(x), int(y)), int(1.4 * radius) + 1, 0, -1)
+    samples = lab[(ring > 0) & (segmented > 0)][:, 1:]
+    if len(samples) < 200:
+        return segmented
+    center = np.median(samples, axis=0)
+    spread = 1.4826 * np.median(np.abs(samples - center), axis=0)
+    limit = max(OFF_COLOR_SIGMAS * float(spread.max()), OFF_COLOR_MIN_DISTANCE)
+    distance = np.linalg.norm(lab[:, :, 1:] - center, axis=2)
+    outside = lab[segmented == 0][:, 1:]
+    if len(outside) < 200:
+        return segmented
+    background = np.median(outside, axis=0)
+    if float(np.linalg.norm(background - center)) < limit:
+        return segmented  # mesa y placa del mismo color: el croma no distingue, se queda GrabCut
+    # Solo sale lo que ademas se parece mas a la mesa que a la placa (no etiquetas ni reflejos de color).
+    to_background = np.linalg.norm(lab[:, :, 1:] - background, axis=2)
+    cleaned = segmented.copy()
+    cleaned[(distance > limit) & (to_background < distance) & (segmented > 0)] = 0
+    # Lo que se quito tiene que ser una region (no pixeles sueltos de la placa): se abre y se cierra.
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7))
+    cleaned = cv2.morphologyEx(cleaned, cv2.MORPH_OPEN, kernel)
+    cleaned = cv2.morphologyEx(cleaned, cv2.MORPH_CLOSE, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (9, 9)))
+    return cleaned if cv2.countNonZero(cleaned) >= 0.5 * cv2.countNonZero(segmented) else segmented
+
+
 def segment_panel_from_features(image: np.ndarray, features: list[dict[str, Any]]) -> np.ndarray | None:
     """Contorno exterior de la placa sembrado con los propios features.
 
@@ -390,6 +438,7 @@ def segment_panel_from_features(image: np.ndarray, features: list[dict[str, Any]
         return None
 
     segmented = ((mask == cv2.GC_FGD) | (mask == cv2.GC_PR_FGD)).astype(np.uint8) * 255
+    segmented = _drop_off_color(small, segmented, points, radii)
     # Los features siempre son parte de la pieza.
     for (x, y), radius in zip(points, radii):
         cv2.circle(segmented, (int(x), int(y)), int(1.3 * radius) + 1, 255, -1)
@@ -405,6 +454,10 @@ def segment_panel_from_features(image: np.ndarray, features: list[dict[str, Any]
         return sum(cv2.pointPolygonTest(contour, (float(x), float(y)), False) >= 0 for x, y in points)
 
     best = max(contours, key=lambda c: (covered(c), cv2.contourArea(c)))
+    # Las piezas son casi convexas: una muesca pequena es un reflejo o una sombra, no la forma.
+    hull = cv2.convexHull(best)
+    if cv2.contourArea(best) >= HULL_MIN_SOLIDITY * cv2.contourArea(hull):
+        best = hull
     return (best / scale).reshape(-1, 2).astype(np.float32)
 
 
