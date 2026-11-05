@@ -8,7 +8,8 @@ backend/settings.json
 backend/storage/
 backend/backups/
 backend/logs/
-
+**/__pycache__
+**/optical_inspector.db
 # Instalador: artefactos de compilacion
 installer/build/
 installer/Output/
