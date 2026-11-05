@@ -376,6 +376,9 @@ CENTER_DARK_MAX = 0.55
 # Un barreno de este radio (px del canvas) o mayor es un hueco grande: no es
 # oscuro (se ve el fondo a traves) y se verifica por su borde, no por el centro.
 LARGE_HOLE_MIN_PX = 45.0
+# Casquillo de laton con centro metalico claro: saturacion minima dentro y maxima en la placa vecina.
+BRASS_CORE_SAT_MIN = 60.0
+BRASS_PLATE_SAT_MAX = 25.0
 
 
 def _radial_profile(
@@ -398,6 +401,10 @@ def classify_feature_type(
     """Clasifica el feature; si el radio inicial se aleja del medido, repite
     la medicion con el radio medido (la resolucion del perfil depende de el)."""
     result = _classify_feature_type_once(gray, hsv, cx, cy, radius_px)
+    if result is None:
+        # Un inserto trae un punto oscuro central cuya subida es la primera del perfil; si con ella no
+        # hay hueco valido se prueba con el siguiente borde (el del disco).
+        result = _classify_feature_type_once(gray, hsv, cx, cy, radius_px, skip=1)
     if result is not None and abs(result["hole_radius_px"] / max(radius_px, 1e-6) - 1.0) > 0.25:
         refined = _classify_feature_type_once(gray, hsv, cx, cy, result["hole_radius_px"])
         if refined is not None:
@@ -444,7 +451,7 @@ def _grey_cone(
 
 
 def _classify_feature_type_once(
-    gray: np.ndarray, hsv: np.ndarray, cx: float, cy: float, radius_px: float
+    gray: np.ndarray, hsv: np.ndarray, cx: float, cy: float, radius_px: float, skip: int = 0
 ) -> dict[str, Any] | None:
     """INSERTO / DELRON_CONICO / DELRON_PLANO por el perfil radial.
 
@@ -491,27 +498,35 @@ def _classify_feature_type_once(
             "rim_radius_px": round(grey["edge"], 2),
             "bore_radius_px": round(0.3 * grey["edge"], 2),
         }
+    # Subidas candidatas del perfil (primero la mas cercana al centro). Un inserto tiene un punto
+    # central pequeno cuya subida no es el borde del hueco: si da un radio ~0 se pasa a la siguiente.
+    rises = [
+        index for index in range(1, half - 1)
+        if gradient[index] >= 0.25 * peak
+        and gradient[index] >= gradient[index - 1]
+        and gradient[index] >= gradient[index + 1]
+    ]
+    # Si el centro esta desplazado un par de pixeles, el borde mas fuerte (el del disco) es la ultima opcion.
+    strongest = int(np.argmax(gradient[:half]))
+    if strongest not in rises and 0 < strongest < half - 1:
+        rises.append(strongest)
+    rises = rises[skip:]
+    hole = 0.0
     rise = None
-    for index in range(1, half - 1):
-        if (
-            gradient[index] >= 0.25 * peak
-            and gradient[index] >= gradient[index - 1]
-            and gradient[index] >= gradient[index + 1]
-        ):
-            rise = index
+    for rise in rises:
+        # El borde puede ser un escalon doble (sombra + borde): se sigue mientras la
+        # pendiente siga siendo significativa respecto al borde mas fuerte.
+        end = rise
+        while end < half - 1 and gradient[end] >= 0.2 * peak:
+            end += 1
+        darkest = int(np.argmin(smooth[:rise + 1]))  # un destello en el centro no cuenta como borde
+        low = float(smooth[darkest])
+        middle = (low + float(smooth[end])) / 2.0
+        above = np.nonzero(smooth[darkest:end + 1] >= middle)[0]
+        hole = float(radii[darkest + above[0]]) if len(above) else float(radii[rise])
+        if hole >= 1.0:
             break
-    if rise is None:
-        return None
-    # El borde puede ser un escalon doble (sombra + borde): se sigue mientras la
-    # pendiente siga siendo significativa respecto al borde mas fuerte.
-    end = rise
-    while end < half - 1 and gradient[end] >= 0.2 * peak:
-        end += 1
-    low = float(smooth[:rise + 1].min())
-    middle = (low + float(smooth[end])) / 2.0
-    above = np.nonzero(smooth[:end + 1] >= middle)[0]
-    hole = float(radii[above[0]]) if len(above) else float(radii[rise])
-    if hole < 1.0:
+    if rise is None or hole < 1.0:
         return None
 
     def band(profile: np.ndarray, low: float, high: float) -> float:
@@ -533,7 +548,15 @@ def _classify_feature_type_once(
     if not all(np.isfinite([interior, center, disk, plate, sat_in, sat_out])):
         return None
     if center > 0.85 * disk or center > CENTER_DARK_MAX * plate:
-        return None  # el centro de un hueco es claramente mas oscuro que la placa
+        # El centro de un hueco es claramente mas oscuro que la placa. Excepcion: casquillo de laton
+        # con centro metalico claro (color latonado dentro, placa sin color alrededor) = delron plano.
+        if band(saturation, 0.0, 0.8) >= BRASS_CORE_SAT_MIN and band(saturation, 2.0, 3.0) <= BRASS_PLATE_SAT_MAX:
+            return {
+                "observed_type": "DELRON_PLANO", "hole_radius_px": round(hole, 2), "cone_score": 0.0,
+                "disk_ratio": 1.0, "ring_ratio": 0.0, "interior_ratio": 1.0, "ramp": 0.0,
+                "rim_radius_px": None, "bore_radius_px": round(0.3 * hole, 2),
+            }
+        return None
 
     # Borde mas fuerte dentro del hueco vs. borde mas fuerte del entorno cercano.
     fine = np.arange(0.0, 4.0 * hole + 1.0, max(hole / 40.0, 0.25))

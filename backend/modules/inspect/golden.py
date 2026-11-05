@@ -332,7 +332,7 @@ def _plate_features(image: np.ndarray, features: list[dict[str, Any]]) -> list[d
     if len(known) < 4:
         return features
     center = np.median(known, axis=0)
-    weights = np.array([0.5, 1.0, 1.0])  # el brillo varia mucho con el reflejo: pesa menos que el color
+    weights = np.array([0.25, 1.0, 1.0])  # el brillo varia mucho con el reflejo: pesa menos que el color
     deviation = np.array([np.linalg.norm((c - center) * weights) if c is not None else np.inf for c in colors])
     finite = deviation[np.isfinite(deviation)]
     limit = max(14.0, float(np.median(finite) + 3.5 * 1.4826 * np.median(np.abs(finite - np.median(finite)))))
