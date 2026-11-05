@@ -271,10 +271,13 @@ def register(
     cand = np.float64([[c["x"], c["y"]] for c in candidates])
     ref = np.asarray(reference_points, dtype=np.float64)
 
-    ref_w = max(reference_extent[0], 1e-9)
+    # El lado MAYOR de la referencia contra el lado mayor de la imagen: una tira angosta y alta
+    # (ancho 13 % de la foto) tendria con el ancho una escala "imposible".
+    ref_long = max(reference_extent[0], reference_extent[1], 1e-9)
+    image_long = max(image_width, image_height)
     scale_range = (
-        min_fill * image_width / ref_w,
-        max_fill * image_width / ref_w * 1.05,
+        min_fill * image_long / ref_long,
+        max_fill * image_long / ref_long * 1.05,
     )
     tolerance = max(6.0, 0.014 * image_width)
 

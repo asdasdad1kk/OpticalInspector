@@ -104,7 +104,9 @@ def build_canvas(bounds: tuple[float, float, float, float]) -> dict[str, Any]:
     ymax += margin
     width_units = xmax - xmin
     height_units = ymax - ymin
-    scale = RECTIFIED_WIDTH / width_units
+    # El lado mayor mide RECTIFIED_WIDTH: una tira angosta no se amplia de mas (y el lienzo no se dispara).
+    scale = RECTIFIED_WIDTH / max(width_units, height_units)
+    width_px = int(round(width_units * scale))
     height_px = int(round(height_units * scale))
     # Referencia (x, -y) -> canvas.
     matrix = np.array(
@@ -113,7 +115,7 @@ def build_canvas(bounds: tuple[float, float, float, float]) -> dict[str, Any]:
     )
     return {
         "scale": scale,
-        "width": RECTIFIED_WIDTH,
+        "width": width_px,
         "height": height_px,
         "matrix": matrix,
         "bounds": (xmin, xmax, ymin, ymax),
@@ -313,6 +315,12 @@ BARRENO_RING_MAX = 0.07
 # Un hueco real es casi negro (interior/placa ~0.2); si el interior es gris medio
 # el borde medido es el de un disco, no el de un hueco.
 INSERT_INTERIOR_RATIO_MIN = 0.45
+# Cono sin color (gris oscuro): el brillo interior SUBE de forma continua del centro al borde
+# (embudo); un barreno liso es una meseta plana. Rampa = (brillo en 0.5-0.85 R - brillo en 0-0.3 R)
+# / placa: conos grises 0.23-0.31, insertos <= 0.16, barrenos <= 0.05.
+CONE_RAMP_MIN = 0.20
+# Pendiente interior maxima (relativa al borde exterior) de un embudo; un escalon interior es de inserto.
+CONE_MAX_INNER_STEP = 0.40
 # Centro / placa maximo para aceptar un hueco (reales <= 0.4; manchas >= 0.69).
 CENTER_DARK_MAX = 0.55
 # Un barreno de este radio (px del canvas) o mayor es un hueco grande: no es
@@ -320,13 +328,18 @@ CENTER_DARK_MAX = 0.55
 LARGE_HOLE_MIN_PX = 45.0
 
 
-def _radial_profile(channel: np.ndarray, cx: float, cy: float, radii: np.ndarray) -> np.ndarray:
-    """Mediana angular por radio: robusta a reflejos y a las pestañas del inserto."""
+def _radial_profile(
+    channel: np.ndarray, cx: float, cy: float, radii: np.ndarray, quantile: float = 50.0
+) -> np.ndarray:
+    """Mediana angular por radio: robusta a reflejos y a las pestañas del inserto.
+
+    `quantile` > 50 se usa para estimar la placa cuando el circulo puede salirse del panel
+    (la mesa es mas oscura): un percentil alto ignora la parte que cae fuera."""
     angles = np.linspace(0, 2 * math.pi, 96, endpoint=False)
     xs = (cx + np.outer(radii, np.cos(angles))).astype(np.float32)
     ys = (cy + np.outer(radii, np.sin(angles))).astype(np.float32)
     values = cv2.remap(channel, xs, ys, cv2.INTER_LINEAR, borderMode=cv2.BORDER_REPLICATE)
-    return np.median(values, axis=1)
+    return np.median(values, axis=1) if quantile == 50.0 else np.percentile(values, quantile, axis=1)
 
 
 def classify_feature_type(
@@ -340,6 +353,44 @@ def classify_feature_type(
         if refined is not None:
             return refined
     return result
+
+
+def _grey_cone(
+    brightness: np.ndarray, radii: np.ndarray, gradient: np.ndarray, half: int, peak: float
+) -> dict[str, float] | None:
+    """Cono sin color evaluado en el borde mas fuerte del perfil.
+
+    Un cono gris se ve como un embudo: negro en el centro, el brillo sube de forma continua y
+    salta a la placa en el borde exterior, sin reborde mas alla. Se evalua aparte de la
+    deteccion del "primer borde" porque, segun la escala, la rampa del embudo puede parecer un
+    borde propio y confundir la medicion del radio.
+    """
+    index = int(np.argmax(gradient[:half]))
+    edge = float(radii[index])
+    if edge < 1.0:
+        return None
+
+    def band(low: float, high: float) -> float:
+        mask = (radii >= low * edge) & (radii <= high * edge)
+        return float(np.median(brightness[mask])) if mask.any() else float("nan")
+
+    core, inner = band(0.0, 0.3), band(0.5, 0.85)
+    plates = [v for v in (band(1.3, 2.0), band(2.0, 3.0), band(3.0, 4.5)) if np.isfinite(v)]
+    if not plates or not np.isfinite(core) or not np.isfinite(inner):
+        return None
+    plate = max(plates)
+    ramp = (inner - core) / max(plate, 1.0)
+    if core > 0.30 * plate or inner > 0.70 * plate or ramp < CONE_RAMP_MIN:
+        return None
+    # La subida debe ser gradual: un inserto tiene un escalon brusco del nucleo oscuro a su disco.
+    inside = np.abs(gradient[(radii >= 0.12 * edge) & (radii <= 0.85 * edge)])
+    if inside.size and peak > 0 and float(inside.max()) > CONE_MAX_INNER_STEP * peak:
+        return None
+    beyond = np.abs(gradient[(radii >= 1.4 * edge) & (radii <= 3.6 * edge)])
+    ring = float(beyond.max() / peak) if beyond.size and peak > 0 else 0.0
+    if ring > 0.2:
+        return None  # hay otro borde importante despues: es un disco/inserto, no un cono
+    return {"edge": edge, "ramp": ramp, "ring": ring, "inner": inner / max(plate, 1.0)}
 
 
 def _classify_feature_type_once(
@@ -377,6 +428,19 @@ def _classify_feature_type_once(
     peak = float(gradient[:half].max())
     if peak <= 0:
         return None
+    grey = _grey_cone(brightness, radii, gradient, half, peak)
+    if grey is not None:
+        return {
+            "observed_type": "DELRON_CONICO",
+            "hole_radius_px": round(grey["edge"], 2),
+            "cone_score": 0.0,
+            "disk_ratio": 1.0,
+            "ring_ratio": round(grey["ring"], 3),
+            "interior_ratio": round(grey["inner"], 3),
+            "ramp": round(grey["ramp"], 3),
+            "rim_radius_px": round(grey["edge"], 2),
+            "bore_radius_px": round(0.3 * grey["edge"], 2),
+        }
     rise = None
     for index in range(1, half - 1):
         if (
@@ -407,7 +471,13 @@ def _classify_feature_type_once(
     interior = band(brightness, 0.35, 0.85)
     center = band(brightness, 0.0, 0.4)
     disk = band(brightness, 1.6, 2.4)
-    plate = band(brightness, 4.5, 6.0)
+    # Placa: la mayor de tres bandas lejanas. En paneles angostos la banda de 4.5-6 R puede caer
+    # en la mesa (mas oscura); la mas brillante es la que sigue sobre el metal.
+    plate = max(
+        (value for value in (band(brightness, 3.8, 4.8), band(brightness, 4.8, 6.2), band(brightness, 6.2, 8.0))
+         if np.isfinite(value)),
+        default=float("nan"),
+    )
     sat_in = band(saturation, 1.15, 1.45)
     sat_out = band(saturation, 2.0, 2.4)
     if not all(np.isfinite([interior, center, disk, plate, sat_in, sat_out])):
@@ -430,12 +500,20 @@ def _classify_feature_type_once(
     cone_score = sat_in + (sat_in - sat_out)
     disk_ratio = disk / max(plate, 1.0)
     interior_ratio = interior / max(plate, 1.0)
+    core = band(brightness, 0.0, 0.3)
+    ramp = (band(brightness, 0.5, 0.85) - core) / max(plate, 1.0)
+    grey_cone = False
     if cone_score >= CONE_SCORE_MIN:
         observed = "DELRON_CONICO"
     elif interior_ratio >= INSERT_INTERIOR_RATIO_MIN:
         # Interior gris medio (no negro): el "hueco" medido es el borde de un
         # disco metalico con un punto oscuro central, es decir un inserto.
         observed = "INSERTO"
+    elif ramp >= CONE_RAMP_MIN and ring_ratio <= 0.2:
+        # Cono sin tono dorado: el borde medido es el borde exterior del cono y el
+        # centro oscuro es su barreno.
+        observed = "DELRON_CONICO"
+        grey_cone = True
     elif ring_ratio <= BARRENO_RING_MAX and disk_ratio > INSERT_DISK_RATIO_MAX:
         observed = "BARRENO"
     elif disk_ratio <= INSERT_DISK_RATIO_MAX:
@@ -463,7 +541,13 @@ def _classify_feature_type_once(
         "disk_ratio": round(disk_ratio, 3),
         "ring_ratio": round(ring_ratio, 3),
         "interior_ratio": round(interior_ratio, 3),
-        "rim_radius_px": None if rim_radius is None or observed == "BARRENO" else round(rim_radius, 2),
+        "ramp": round(ramp, 3),
+        "rim_radius_px": (
+            round(hole, 2) if grey_cone
+            else None if rim_radius is None or observed == "BARRENO" else round(rim_radius, 2)
+        ),
+        # Radio del barreno central: en conos grises es el nucleo oscuro, no el borde medido.
+        "bore_radius_px": round(0.3 * hole, 2) if grey_cone else round(hole, 2),
     }
 
 

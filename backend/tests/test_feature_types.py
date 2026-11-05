@@ -45,7 +45,11 @@ PLANOS = [
     (63, 320, C), (464, 297, C), (64, 434, C), (120, 497, P), (213, 494, C), (306, 492, P),
     (383, 491, P), (506, 489, C),
 ]
-CASES = {"barrenos.png": BARRENOS, "panel1.png": PANEL1, "delrons planos.png": PLANOS}
+# Conos sin tono dorado (gris oscuro): el brillo interior sube de forma continua hacia el borde.
+CURVO = [(346, 62, C), (390, 65, C), (336, 293, C), (373, 428, C)]
+# Detecciones esperadas FUERA de la pieza (objetos de la mesa); el contorno las descarta al dar de alta.
+DISTRACTORS = {"barrenos.png": [(94, 558)]}  # tapa blanca con ranuras, a la izquierda de la pieza
+CASES = {"barrenos.png": BARRENOS, "panel1.png": PANEL1, "delrons planos.png": PLANOS, "panel_curvo.png": CURVO}
 
 
 def load(name: str) -> np.ndarray:
@@ -66,6 +70,8 @@ def test_classifier() -> None:
             hsv = cv2.cvtColor(scaled, cv2.COLOR_BGR2HSV)
             for feature in detected:
                 x, y, expected = min(truth, key=lambda t: math.hypot(t[0] - feature["x_px"], t[1] - feature["y_px"]))
+                if any(math.hypot(dx - feature["x_px"], dy - feature["y_px"]) < 12 for dx, dy in DISTRACTORS.get(name, [])):
+                    continue
                 if math.hypot(x - feature["x_px"], y - feature["y_px"]) > 7:
                     errors.append(f"{name}: deteccion sin anotar en ({feature['x_px']:.0f}, {feature['y_px']:.0f})")
                     continue
@@ -85,7 +91,8 @@ def test_reference_counts() -> None:
     expected = {
         "barrenos.png": {I: 3, B: 6},          # 3 insertos + 5 barrenos + hueco grande
         "panel1.png": {C: 18, I: 16},
-        "delrons planos.png": {P: 10, C: 11},
+        "delrons planos.png": {P: 12, C: 14},  # los 26 de la foto, incluida la esquina superior derecha
+        "panel_curvo.png": {C: 4},
     }
     for name, counts in expected.items():
         features = analyze_reference(load(name))["features"]

@@ -19,6 +19,8 @@ import numpy as np
 from .pipeline import LARGE_HOLE_FRACTION, LARGE_HOLE_MIN_PX, MIN_ANCHORS, classify_color, classify_feature_type, classify_large_hole, measure_radius
 from .registration import detect_blob_candidates
 
+LABEL_MIN_SOLIDITY = 0.75
+
 FEATURE_CATEGORIES = ("features", "contour", "distances", "label")
 
 DEFAULT_ENABLED = {key: True for key in FEATURE_CATEGORIES}
@@ -99,7 +101,7 @@ def detect_features(image: np.ndarray) -> list[dict[str, Any]]:
         shape = _blob_shape(gray, candidate)
         if shape is None or shape["touches"] or shape["area"] < min_area:
             continue
-        if shape["circularity"] < 0.55 or shape["aspect"] < 0.70:
+        if shape["circularity"] < 0.55 or shape["aspect"] < 0.62:
             continue
 
         radius = max(4.0, candidate["sigma"] * 1.8)
@@ -122,7 +124,7 @@ def detect_features(image: np.ndarray) -> list[dict[str, Any]]:
             "x_px": candidate["x"],
             "y_px": candidate["y"],
             "radius_px": float(radius),
-            "bore_px": float(radius if shape_type["observed_type"] == "BARRENO" else shape_type["hole_radius_px"]),
+            "bore_px": float(radius if shape_type["observed_type"] == "BARRENO" else shape_type["bore_radius_px"]),
             "rim_px": shape_type.get("rim_radius_px"),
             "response": candidate["response"],
             "material": MATERIAL_BY_TYPE[shape_type["observed_type"]],
@@ -306,6 +308,106 @@ def segment_panel(
     return (largest / scale).reshape(-1, 2).astype(np.float32)
 
 
+def _plate_features(image: np.ndarray, features: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Features cuyo entorno inmediato es placa metalica.
+
+    Descarta falsos positivos sobre la mesa (una banda negra, un objeto oscuro): su anillo
+    exterior tiene el color de la mesa y no el de la mayoria de los features, que estan en la placa.
+    """
+    if len(features) < 4:
+        return features
+    height, width = image.shape[:2]
+    lab = cv2.cvtColor(cv2.GaussianBlur(image, (0, 0), 1.5), cv2.COLOR_BGR2LAB).astype(np.float32)
+    colors: list[np.ndarray | None] = []
+    for feature in features:
+        radius = _outer_px(feature)
+        x, y = int(feature["x_px"]), int(feature["y_px"])
+        reach = int(2.6 * radius) + 2
+        x0, y0, x1, y1 = max(0, x - reach), max(0, y - reach), min(width, x + reach + 1), min(height, y + reach + 1)
+        yy, xx = np.mgrid[y0:y1, x0:x1]
+        distance = np.hypot(xx - feature["x_px"], yy - feature["y_px"])
+        ring = lab[y0:y1, x0:x1][(distance >= 1.4 * radius) & (distance <= 2.4 * radius)]
+        colors.append(np.median(ring, axis=0) if len(ring) >= 12 else None)
+    known = np.array([c for c in colors if c is not None])
+    if len(known) < 4:
+        return features
+    center = np.median(known, axis=0)
+    weights = np.array([0.5, 1.0, 1.0])  # el brillo varia mucho con el reflejo: pesa menos que el color
+    deviation = np.array([np.linalg.norm((c - center) * weights) if c is not None else np.inf for c in colors])
+    finite = deviation[np.isfinite(deviation)]
+    limit = max(14.0, float(np.median(finite) + 3.5 * 1.4826 * np.median(np.abs(finite - np.median(finite)))))
+    good = [f for f, d in zip(features, deviation) if d <= limit]
+    return good if len(good) >= 4 else features
+
+
+def segment_panel_from_features(image: np.ndarray, features: list[dict[str, Any]]) -> np.ndarray | None:
+    """Contorno exterior de la placa sembrado con los propios features.
+
+    Cada feature aporta placa segura a su alrededor (su anillo exterior), asi GrabCut aprende el
+    aspecto de TODA la placa, incluidas las esquinas en sombra o con reflejo lejos del centro.
+    El fondo seguro es lo que queda lejos de los features y una franja fina del borde de la
+    imagen; la zona intermedia se deja probable para que GrabCut decida.
+    """
+    height, width = image.shape[:2]
+    scale = min(1.0, 800.0 / max(height, width))
+    small = cv2.resize(image, None, fx=scale, fy=scale, interpolation=cv2.INTER_AREA) if scale < 1.0 else image.copy()
+    sh, sw = small.shape[:2]
+    points = np.float32([[f["x_px"], f["y_px"]] for f in features]) * scale
+    radii = np.float32([_outer_px(f) for f in features]) * scale
+    if len(points) < 3:
+        return None
+
+    span = max(float(np.ptp(points[:, 0])), float(np.ptp(points[:, 1])), 10.0)
+    big = float(radii.max())
+    hull = np.zeros((sh, sw), np.uint8)
+    cv2.fillConvexPoly(hull, cv2.convexHull(points.astype(np.int32)), 255)
+
+    def grow(mask: np.ndarray, amount: float) -> np.ndarray:
+        size = 2 * max(1, int(amount)) + 1
+        return cv2.dilate(mask, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (size, size)))
+
+    probable_fg = grow(hull, 0.05 * span + 2.0 * big)
+    possible = grow(hull, 0.30 * span + 4.0 * big)
+
+    mask = np.full((sh, sw), cv2.GC_BGD, np.uint8)
+    mask[possible > 0] = cv2.GC_PR_BGD
+    mask[probable_fg > 0] = cv2.GC_PR_FGD
+    border = max(2, int(0.004 * max(sh, sw)))
+    mask[:border, :] = mask[-border:, :] = mask[:, :border] = mask[:, -border:] = cv2.GC_BGD
+
+    sure = np.zeros((sh, sw), np.uint8)
+    for (x, y), radius in zip(points, radii):
+        cv2.circle(sure, (int(x), int(y)), int(1.8 * radius) + 2, 255, -1)
+    shrunk = (points.mean(axis=0) + (cv2.convexHull(points.astype(np.int32)).reshape(-1, 2) - points.mean(axis=0)) * 0.7)
+    cv2.fillConvexPoly(sure, shrunk.astype(np.int32), 255)
+    mask[sure > 0] = cv2.GC_FGD
+
+    background = np.zeros((1, 65))
+    foreground = np.zeros((1, 65))
+    try:
+        cv2.grabCut(small, mask, None, background, foreground, 6, cv2.GC_INIT_WITH_MASK)
+    except cv2.error:
+        return None
+
+    segmented = ((mask == cv2.GC_FGD) | (mask == cv2.GC_PR_FGD)).astype(np.uint8) * 255
+    # Los features siempre son parte de la pieza.
+    for (x, y), radius in zip(points, radii):
+        cv2.circle(segmented, (int(x), int(y)), int(1.3 * radius) + 1, 255, -1)
+    segmented = cv2.morphologyEx(segmented, cv2.MORPH_OPEN, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5)))
+    close = max(3, int(0.012 * max(sh, sw)))
+    segmented = cv2.morphologyEx(segmented, cv2.MORPH_CLOSE, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (close, close)))
+
+    contours, _ = cv2.findContours(segmented, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
+    if not contours:
+        return None
+    # La region que contiene mas features (no una mancha suelta de la mesa).
+    def covered(contour: np.ndarray) -> int:
+        return sum(cv2.pointPolygonTest(contour, (float(x), float(y)), False) >= 0 for x, y in points)
+
+    best = max(contours, key=lambda c: (covered(c), cv2.contourArea(c)))
+    return (best / scale).reshape(-1, 2).astype(np.float32)
+
+
 def detect_label(image: np.ndarray, contour: np.ndarray) -> dict[str, float] | None:
     """Etiqueta azulada/clara de identificacion dentro del panel."""
     hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
@@ -315,6 +417,13 @@ def detect_label(image: np.ndarray, contour: np.ndarray) -> dict[str, float] | N
     mask = cv2.bitwise_and(mask, inside)
     mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, np.ones((9, 9), np.uint8))
     contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    # Una etiqueta es una mancha maciza y rectangular (solidez ~0.9); un trazo azulado de tinta o
+    # una sombra (solidez ~0.6) no lo es.
+    def solid(blob: np.ndarray) -> bool:
+        (_, _), (bw, bh), _ = cv2.minAreaRect(blob)
+        return cv2.contourArea(blob) >= LABEL_MIN_SOLIDITY * max(bw * bh, 1.0)
+
+    contours = [c for c in contours if solid(c)]
     if not contours:
         return None
     best = max(contours, key=cv2.contourArea)
@@ -348,17 +457,23 @@ def analyze_reference(
             "o agregue features manualmente."
         )
 
-    seed = np.float32([[f["x_px"], f["y_px"]] for f in raw_features])
-    contour = segment_panel(image, seed)
+    plate_features = _plate_features(image, raw_features)
+    contour = segment_panel_from_features(image, plate_features)
+    if contour is None or len(contour) < 10:
+        seed = np.float32([[f["x_px"], f["y_px"]] for f in plate_features])
+        contour = segment_panel(image, seed)
     if contour is None or len(contour) < 10:
         raise ValueError("No fue posible segmentar el contorno de la pieza.")
 
     inside = np.zeros((height, width), np.uint8)
     cv2.fillPoly(inside, [contour.astype(np.int32)], 255)
-    inside = cv2.erode(inside, np.ones((5, 5), np.uint8))
+    # Un feature pegado al borde puede quedar a unos pixeles fuera del contorno suavizado: se
+    # conserva si su centro esta a menos de 0.8 de su radio de la silueta.
+    outside_distance = cv2.distanceTransform(255 - inside, cv2.DIST_L2, 3)
     raw_features = [
         f for f in raw_features
         if inside[min(height - 1, int(f["y_px"])), min(width - 1, int(f["x_px"]))] > 0
+        or outside_distance[min(height - 1, int(f["y_px"])), min(width - 1, int(f["x_px"]))] <= 0.8 * _outer_px(f)
     ]
     # Los huecos grandes dentro de la pieza (el GrabCut los deja fuera del contorno
     # exterior, asi que la mascara "inside" sigue siendo la silueta exterior).
@@ -655,12 +770,12 @@ def check_distances(
     for a, b in pairs:
         nominal = float(np.hypot(*(pts[a] - pts[b])))
         actual = float(np.hypot(*(measured[a] - measured[b])))
-        error_pct = abs(actual - nominal) / max(nominal, 1e-9) * 100.0
-        # Piso absoluto de ~3 px de canvas: en distancias cortas el ruido de
-        # medicion domina el porcentaje.
-        error_pct = max(0.0, error_pct - 3.0 / scale / max(nominal, 1e-9) * 100.0 * 0.0)
-        floor_pct = 3.0 / scale / max(nominal, 1e-9) * 100.0
-        error_pct = error_pct if error_pct > floor_pct else 0.0
+        # Piso absoluto: el centro de un feature se mide con la misma tolerancia que su posicion
+        # (fraccion de su radio); en distancias cortas ese ruido, no el porcentaje, domina. Solo la
+        # parte del error que excede el piso cuenta.
+        radius = max(float(found[a][0]["radius"]), float(found[b][0]["radius"]))
+        floor_abs = max(float(options.get("position_ok_radii", 0.45)) * radius, 3.0 / scale)
+        error_pct = max(0.0, abs(actual - nominal) - floor_abs) / max(nominal, 1e-9) * 100.0
         if error_pct > worst:
             worst = error_pct
             worst_pair = (found[a][0]["id"], found[b][0]["id"], nominal, actual)
