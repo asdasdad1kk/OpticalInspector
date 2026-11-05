@@ -38,6 +38,7 @@ DB_PATH = _path("OI_DB_PATH", DATA_DIR / "optical_inspector.db")
 IMAGES_DIR = _path("OI_IMAGES_DIR", DATA_DIR / "storage" / "inspections")
 GOLDEN_DIR = _path("OI_GOLDEN_DIR", DATA_DIR / "storage" / "golden")
 SCANS_DIR = _path("OI_SCANS_DIR", DATA_DIR / "storage" / "scans")
+SCANS3D_DIR = _path("OI_SCANS3D_DIR", DATA_DIR / "storage" / "scans3d")
 VALIDATION_DIR = _path("OI_VALIDATION_DIR", DATA_DIR / "storage" / "validation")
 CALIBRATION_DIR = _path("OI_CALIBRATION_DIR", DATA_DIR / "storage" / "calibration")
 BACKUP_DIR = _path("OI_BACKUP_DIR", DATA_DIR / "backups")
@@ -56,6 +57,7 @@ PATHS = {
     "OI_IMAGES_DIR": IMAGES_DIR,
     "OI_GOLDEN_DIR": GOLDEN_DIR,
     "OI_SCANS_DIR": SCANS_DIR,
+    "OI_SCANS3D_DIR": SCANS3D_DIR,
     "OI_VALIDATION_DIR": VALIDATION_DIR,
     "OI_CALIBRATION_DIR": CALIBRATION_DIR,
     "OI_BACKUP_DIR": BACKUP_DIR,
@@ -66,7 +68,7 @@ PATHS = {
 
 def ensure_dirs() -> None:
     for directory in (
-        DATA_DIR, DB_PATH.parent, IMAGES_DIR, GOLDEN_DIR, SCANS_DIR, VALIDATION_DIR,
+        DATA_DIR, DB_PATH.parent, IMAGES_DIR, GOLDEN_DIR, SCANS_DIR, SCANS3D_DIR, VALIDATION_DIR,
         CALIBRATION_DIR, BACKUP_DIR, LOG_DIR, SETTINGS_FILE.parent,
     ):
         directory.mkdir(parents=True, exist_ok=True)

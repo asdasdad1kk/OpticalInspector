@@ -60,6 +60,34 @@ def test_scan_with_depth() -> None:
         service.stop()
 
 
+def test_grab_rgbd() -> None:
+    """Un cuadro color+profundidad del mismo frameset (escaner 3D en movimiento)."""
+    fake.WORLD.depth_supported = True
+    service = make_service()
+    service.start(width=1280, height=720, fps=30, provider="realsense")
+    try:
+        time.sleep(0.2)
+        before = fake.WORLD.calls.count("align")
+        frame = service.grab_rgbd()
+        assert frame["color"].shape == (720, 1280, 3) and frame["depth_m"].shape == (720, 1280)
+        assert frame["depth_m"].dtype == np.float32
+        valid = frame["depth_m"] > 0
+        assert valid.mean() > 0.9, "la mayoria de pixeles tienen profundidad"
+        assert 0.3 < float(np.median(frame["depth_m"][valid])) < 0.6, "profundidad en metros (la escena esta a ~0.45 m)"
+        assert frame["intrinsics"]["fx"] > 0
+        assert fake.WORLD.calls.count("align") >= before + 1
+        time.sleep(0.3)
+        settled = fake.WORLD.calls.count("align")
+        time.sleep(0.3)
+        assert fake.WORLD.calls.count("align") == settled, "sin peticion no se alinea (no gasta CPU)"
+        # varias lecturas seguidas (el escaner pide un cuadro tras otro)
+        for _ in range(5):
+            assert service.grab_rgbd()["depth_m"].shape == (720, 1280)
+        print("grab_rgbd: cuadro color+profundidad en metros, sin gasto cuando no se pide: OK")
+    finally:
+        service.stop()
+
+
 def test_fallback_without_depth() -> None:
     fake.WORLD.depth_supported = False
     service = make_service()
@@ -143,6 +171,7 @@ def test_hung_probe_does_not_freeze() -> None:
 if __name__ == "__main__":
     test_hung_probe_does_not_freeze()
     test_scan_with_depth()
+    test_grab_rgbd()
     test_fallback_without_depth()
     test_scan_requires_camera()
     print("TODO OK")

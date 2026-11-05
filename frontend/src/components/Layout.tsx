@@ -2,6 +2,7 @@ import {
   Camera,
   Database,
   FileUp,
+  Orbit,
   ScanSearch,
   Settings,
   ScanLine,
@@ -133,6 +134,28 @@ export default function Layout() {
                   />
 
                   <span>Database</span>
+
+                  {isActive && (
+                    <span className="absolute inset-x-3 bottom-0 h-0.5 rounded-t bg-emerald-400" />
+                  )}
+                </>
+              )}
+            </NavLink>
+
+            <NavLink to="/scanner" className={link}>
+              {({ isActive }) => (
+                <>
+                  <Orbit
+                    size={16}
+                    strokeWidth={1.8}
+                    className={
+                      isActive
+                        ? "text-emerald-400"
+                        : "text-zinc-500 transition-colors group-hover:text-zinc-300"
+                    }
+                  />
+
+                  <span>Escáner 3D</span>
 
                   {isActive && (
                     <span className="absolute inset-x-3 bottom-0 h-0.5 rounded-t bg-emerald-400" />

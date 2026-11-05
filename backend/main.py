@@ -31,6 +31,11 @@ from modules.config.router import router as config_router
 from modules.inspect.router import router as inspect_router
 from modules.reference.router import router as reference_router
 from modules.upload.router import router as upload_router
+
+try:  # el escaner 3D es independiente: si falla al cargar, el resto de la app arranca igual
+    from modules.scanner3d.router import router as scanner_router
+except Exception as _scanner_error:  # pragma: no cover
+    scanner_router = None
 import os
 import sys
 
@@ -175,6 +180,12 @@ app.include_router(
     database_router,
     prefix="/api",
 )
+
+if scanner_router is not None:
+    app.include_router(
+        scanner_router,
+        prefix="/api",
+    )
 
 
 # ============================================================

@@ -10,3 +10,4 @@ pystray
 pillow
 websockets
 python-dotenv
+open3d>=0.19  # Escaner 3D (opcional: sin el, solo ese panel queda deshabilitado)

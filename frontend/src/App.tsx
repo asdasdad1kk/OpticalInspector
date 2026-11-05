@@ -5,6 +5,7 @@ import UploadPage from "./pages/UploadPage";
 import DatabasePage from "./pages/DatabasePage";
 import ReferencePage from "./pages/ReferencePage";
 import SettingsPage from "./pages/SettingsPage";
+import ScannerPage from "./pages/ScannerPage";
 export default function App(){
     return <Routes>
         <Route element={<Layout/>}>
@@ -13,6 +14,7 @@ export default function App(){
         <Route path="/reference" element={<ReferencePage/>}/>
         <Route path="/inspect" element={<InspectPage/>}/>
         <Route path="/database" element={<DatabasePage/>}/>
+        <Route path="/scanner" element={<ScannerPage/>}/>
         <Route path="*" element={<Navigate to="/inspect" replace/>}/>
         </Route>
         </Routes>}

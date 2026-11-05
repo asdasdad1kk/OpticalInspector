@@ -83,6 +83,9 @@ class CameraService:
         self._color_intrinsics: dict[str, float] | None = None
         self._scan_frames: list[np.ndarray] | None = None
         self._scan_target = 0
+        # Cuadro RGB-D suelto (escaner 3D en movimiento): color y profundidad del MISMO frameset.
+        self._rgbd_wanted = False
+        self._rgbd_slot: tuple[np.ndarray, np.ndarray] | None = None
         self._frame_condition = threading.Condition(self._state_lock)
         self._stop_event = threading.Event()
 
@@ -411,6 +414,8 @@ class CameraService:
             self._align = None
             self._depth_available = False
             self._scan_frames = None
+            self._rgbd_wanted = False
+            self._rgbd_slot = None
             if thread is None or not thread.is_alive():
                 self._thread = None
             self._latest_frame = None
@@ -451,7 +456,7 @@ class CameraService:
                     frames = pipeline.wait_for_frames(timeout_ms=1000)
                     depth_image = None
                     align = self._align
-                    if self._scan_frames is not None and align is not None:
+                    if (self._scan_frames is not None or self._rgbd_wanted) and align is not None:
                         # Alinear cuesta CPU: solo se hace mientras hay un escaneo en curso.
                         frames = align.process(frames)
                         depth_frame = frames.get_depth_frame()
@@ -483,6 +488,9 @@ class CameraService:
                     scan = self._scan_frames
                     if capture is None and depth_image is not None and scan is not None and len(scan) < self._scan_target:
                         scan.append(depth_image)
+                    if capture is None and depth_image is not None and self._rgbd_wanted:
+                        self._rgbd_slot = (self._latest_frame, depth_image)
+                        self._rgbd_wanted = False
                     self._frame_condition.notify_all()
 
             except RuntimeError as error:
@@ -559,6 +567,41 @@ class CameraService:
             "noise_mm": noise_mm,
             "valid_fraction": valid_fraction,
         }
+
+    def grab_rgbd(self, timeout: float = 2.0) -> dict[str, Any]:
+        """Un solo cuadro de color + profundidad alineada, sin promediar.
+
+        Para escanear en movimiento: no hay tiempo de promediar cuadros porque la camara se mueve;
+        la fusion la hace despues el TSDF. Color y profundidad vienen del mismo frameset.
+        Devuelve la profundidad en metros (float32, 0 = sin dato) y los intrinsecos del color.
+        """
+        with self._frame_condition:
+            if not self._running:
+                raise RuntimeError("La cámara no está iniciada.")
+            if not self._depth_available:
+                raise RuntimeError(
+                    "Esta cámara no entrega profundidad. Use una Intel RealSense conectada por USB 3."
+                )
+            self._rgbd_slot = None
+            self._rgbd_wanted = True
+            deadline = time.monotonic() + timeout
+            try:
+                while self._rgbd_slot is None and self._running:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        break
+                    self._frame_condition.wait(timeout=remaining)
+            finally:
+                slot, self._rgbd_slot = self._rgbd_slot, None
+                self._rgbd_wanted = False
+            scale = self._depth_scale
+            intrinsics = dict(self._color_intrinsics or {})
+        if slot is None:
+            raise RuntimeError("La cámara no entregó un cuadro con profundidad a tiempo.")
+        color, raw = slot
+        depth_m = raw.astype(np.float32) * np.float32(scale)
+        depth_m[raw == 0] = 0.0
+        return {"color": color, "depth_m": depth_m, "intrinsics": intrinsics}
 
     @staticmethod
     def _fuse_depth(stack: list[np.ndarray], scale_mm: float) -> tuple[np.ndarray, float, float]:
