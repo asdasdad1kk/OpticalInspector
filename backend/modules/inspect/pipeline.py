@@ -312,6 +312,10 @@ INSERT_DISK_RATIO_MAX = 0.79
 # Se mide el mayor gradiente entre 1.5 y 3.6 radios, relativo al borde del hueco
 # (barrenos 0.01-0.02, delron plano >= 0.12, inserto >= 0.35).
 BARRENO_RING_MAX = 0.07
+# Cono tostado (camaras de alta resolucion como la BRIO): el cono mide mas que el barreno central, asi que
+# las bandas 1.2-2.4 R siguen sobre la cara del cono y conservan color (sat 32-60). Un inserto es gris
+# (sat <= 17 en esas bandas) y un delron plano es claro (disk_ratio alto).
+CONE_TAN_SAT_MIN = 28.0
 # Un hueco real es casi negro (interior/placa ~0.2); si el interior es gris medio
 # el borde medido es el de un disco, no el de un hueco.
 INSERT_INTERIOR_RATIO_MIN = 0.45
@@ -503,7 +507,10 @@ def _classify_feature_type_once(
     core = band(brightness, 0.0, 0.3)
     ramp = (band(brightness, 0.5, 0.85) - core) / max(plate, 1.0)
     grey_cone = False
+    tan_ring = min(band(saturation, 1.2, 1.5), band(saturation, 1.5, 2.0), band(saturation, 2.0, 2.4))
     if cone_score >= CONE_SCORE_MIN:
+        observed = "DELRON_CONICO"
+    elif tan_ring >= CONE_TAN_SAT_MIN and disk_ratio <= INSERT_DISK_RATIO_MAX:
         observed = "DELRON_CONICO"
     elif interior_ratio >= INSERT_INTERIOR_RATIO_MIN:
         # Interior gris medio (no negro): el "hueco" medido es el borde de un

@@ -104,6 +104,14 @@ def test_reference_counts() -> None:
     print("pieza patron: conteos por tipo OK")
 
 
+def test_brio_cones() -> None:
+    """Fotos de la BRIO (1080p): los 7 delrons son conicos; el cono mide mas que su barreno central."""
+    for path in sorted((TESTS / "panel_curvo_completo").glob("*.jpg")):
+        features = analyze_reference(cv2.imread(str(path)))["features"]
+        assert dict(collections.Counter(f["type"] for f in features)) == {C: 7}, path.name
+    print("BRIO conos: OK")
+
+
 def test_large_hole() -> None:
     frame = load("barrenos.png")
     gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
@@ -120,4 +128,5 @@ if __name__ == "__main__":
     test_classifier()
     test_reference_counts()
     test_large_hole()
+    test_brio_cones()
     print("TODO OK")

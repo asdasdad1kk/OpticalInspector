@@ -27,7 +27,7 @@ export async function startCamera(options: CameraStartOptions = {}): Promise<Cam
     body: JSON.stringify({
       width: options.width ?? 1280,
       height: options.height ?? 720,
-      fps: options.fps ?? 10,
+      fps: options.fps ?? (options.provider === "brio" ? 60 : 10),
       preview_quality: 75,
       provider: options.provider,
       device_index: options.deviceIndex,

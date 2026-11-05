@@ -3,6 +3,7 @@ from __future__ import annotations
 import threading
 import time
 import warnings
+from collections import deque
 from dataclasses import dataclass
 from typing import Any
 
@@ -25,6 +26,11 @@ PROBE_TIMEOUT = 8.0
 STATUS_LOCK_TIMEOUT = 1.0
 # Unidad de profundidad de 0.1 mm: mas resolucion a distancia corta (alcance maximo ~6.5 m).
 DEPTH_UNITS_M = 0.0001
+# Logitech BRIO (MJPG): 60 fps hasta 1080p, 30 fps en 4K.
+BRIO_MAX_FPS = 60
+BRIO_MAX_FPS_4K = 30
+BRIO_WARMUP_FRAMES = 12  # cuadros descartados para que asienten el autoenfoque y la exposicion
+BRIO_STILL_CANDIDATES = 4  # cuadros recientes entre los que se elige el mas nitido
 
 try:  # el sondeo de indices genera avisos ruidosos de DirectShow
     cv2.utils.logging.setLogLevel(cv2.utils.logging.LOG_LEVEL_ERROR)
@@ -92,6 +98,8 @@ class CameraService:
         self._running = False
         self._sequence = 0
         self._latest_frame: np.ndarray | None = None
+        # Ultimos cuadros de la BRIO: la foto de inspeccion usa el mas nitido (el autoenfoque oscila).
+        self._recent_frames: deque[np.ndarray] = deque(maxlen=BRIO_STILL_CANDIDATES)
         self._latest_preview: bytes | None = None
         self._last_error: str | None = None
 
@@ -140,6 +148,7 @@ class CameraService:
             self._preview_quality = preview_quality
             self._last_error = None
             self._latest_frame = None
+            self._recent_frames.clear()
             self._latest_preview = None
             self._sequence = 0
             self._stop_event.clear()
@@ -274,6 +283,8 @@ class CameraService:
         capture.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
         capture.set(cv2.CAP_PROP_FRAME_WIDTH, self._width)
         capture.set(cv2.CAP_PROP_FRAME_HEIGHT, self._height)
+        # La BRIO solo da 60 fps hasta 1080p; en 4K su maximo es 30 y pedir mas la hace bajar a 15.
+        self._fps = min(self._fps, BRIO_MAX_FPS_4K if self._height > 1080 else BRIO_MAX_FPS)
         capture.set(cv2.CAP_PROP_FPS, self._fps)
         capture.set(cv2.CAP_PROP_BUFFERSIZE, 1)
 
@@ -290,7 +301,11 @@ class CameraService:
         else:
             capture.set(cv2.CAP_PROP_AUTOFOCUS, 1)
 
-        ok, frame = capture.read()
+        # Como la app de Camara de Windows: los primeros cuadros salen desenfocados u oscuros mientras
+        # el autoenfoque y la exposicion automatica se asientan; se descartan antes de empezar.
+        ok, frame = False, None
+        for _ in range(BRIO_WARMUP_FRAMES):
+            ok, frame = capture.read()
         if not ok or frame is None:
             capture.release()
             raise RuntimeError("La Logitech BRIO se abrio pero no entrega imagen.")
@@ -482,6 +497,8 @@ class CameraService:
 
                 with self._frame_condition:
                     self._latest_frame = frame.copy()
+                    if capture is not None:
+                        self._recent_frames.append(self._latest_frame)
                     self._latest_preview = encoded.tobytes()
                     self._sequence += 1
                     self._last_error = None
@@ -670,7 +687,20 @@ class CameraService:
         with self._state_lock:
             if self._latest_frame is None:
                 raise RuntimeError("La cámara todavía no tiene un frame disponible.")
-            return self._latest_frame.copy()
+            candidates = list(self._recent_frames) if self._capture is not None else []
+            if len(candidates) < 2:
+                return self._latest_frame.copy()
+        # Los cuadros guardados no se modifican nunca: se puede puntuar fuera del candado.
+        return max(candidates, key=self._sharpness).copy()
+
+    @staticmethod
+    def _sharpness(frame: np.ndarray) -> float:
+        """Varianza del laplaciano sobre una version reducida: mayor = mas enfocado."""
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        scale = 960.0 / max(gray.shape)
+        if scale < 1.0:
+            gray = cv2.resize(gray, None, fx=scale, fy=scale, interpolation=cv2.INTER_AREA)
+        return float(cv2.Laplacian(gray, cv2.CV_32F).var())
 
     def capture_png(self) -> bytes:
         frame = self.capture_bgr()
