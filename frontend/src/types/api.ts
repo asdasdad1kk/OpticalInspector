@@ -200,6 +200,14 @@ export interface ReferenceCategories {
   label: boolean;
 }
 
+/** Zona recortada de la foto (pixeles de la imagen original). */
+export interface CropRect {
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+}
+
 export interface ReferenceAnalysis {
   features: ReferenceFeature[];
   contour: [number, number][];
@@ -214,6 +222,8 @@ export interface ReferenceAnalysis {
   image_jpeg?: string | null;
   relief?: Relief;
   scan_id?: string;
+  /** [x, y, ancho, alto] si la pieza se analizó recortada. */
+  crop?: [number, number, number, number];
 }
 
 /** Resultado por feature guardado en la inspección (coordenadas del canvas rectificado). */

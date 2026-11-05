@@ -4,6 +4,7 @@ import {
   Camera,
   CheckCircle2,
   CircleStop,
+  Crop,
   ImageIcon,
   Gauge,
   LoaderCircle,
@@ -33,6 +34,7 @@ import ZoomableImage, { type ImageMarker } from "../components/ZoomableImage";
 const PartViewer3D = lazy(() => import("../components/PartViewer3D"));
 import { EDITABLE_TYPES, FEATURE_TYPES, typeLabel } from "../components/FeatureInfo";
 import type {
+  CropRect,
   CameraStatus,
   ScanInfo,
   ReferenceAnalysis,
@@ -78,6 +80,9 @@ export default function ReferencePage() {
   const [scanId, setScanId] = useState<string>();
   const [scanInfo, setScanInfo] = useState<ScanInfo>();
   const [scanning, setScanning] = useState(false);
+  // Trim: solo se analiza (y luego se inspecciona) esta zona de la foto.
+  const [crop, setCrop] = useState<CropRect>();
+  const [cropMode, setCropMode] = useState(false);
   const [imageDims, setImageDims] = useState<{ width: number; height: number }>();
 
   const [partNo, setPartNo] = useState("");
@@ -133,6 +138,8 @@ export default function ReferencePage() {
       resetAnalysis();
       setScanId(undefined);
       setScanInfo(undefined);
+      setCrop(undefined);
+      setCropMode(false);
       setPhoto(await captureSnapshot());
     } catch (caught) {
       setError(message(caught, "No fue posible capturar la imagen."));
@@ -146,6 +153,8 @@ export default function ReferencePage() {
       setError(undefined);
       resetAnalysis();
       const { photo: scanned, info } = await scanDepth(16);
+      setCrop(undefined);
+      setCropMode(false);
       setPhoto(scanned);
       setScanId(info.scan_id);
       setScanInfo(info);
@@ -164,6 +173,8 @@ export default function ReferencePage() {
     resetAnalysis();
     setScanId(undefined);
     setScanInfo(undefined);
+    setCrop(undefined);
+    setCropMode(false);
     setPhoto(file);
   }
 
@@ -171,6 +182,8 @@ export default function ReferencePage() {
     setPhoto(undefined);
     setScanId(undefined);
     setScanInfo(undefined);
+    setCrop(undefined);
+    setCropMode(false);
     resetAnalysis();
   }
 
@@ -186,6 +199,7 @@ export default function ReferencePage() {
         Number.isFinite(length) && length > 0 ? length : undefined,
         knownAxis,
         scanId,
+        crop,
       );
       // Con calibración, las coordenadas están en la imagen corregida.
       setCorrectedUrl(result.image_jpeg ? `data:image/jpeg;base64,${result.image_jpeg}` : undefined);
@@ -251,7 +265,7 @@ export default function ReferencePage() {
       void _image;
       void _relief;
       void _scan;
-      setSaved(await saveReference({ photo, partNo, revision, description, reference, scanId }));
+      setSaved(await saveReference({ photo, partNo, revision, description, reference, scanId, crop }));
     } catch (caught) {
       setError(message(caught, "No fue posible guardar la pieza patrón."));
     } finally {
@@ -264,9 +278,18 @@ export default function ReferencePage() {
     [analysis],
   );
 
+  // Alinean solo los features pequeños: un hueco grande no es un punto detectable.
+  const anchorCount = useMemo(() => {
+    if (!analysis) return 0;
+    const longSide = imageDims ? Math.max(imageDims.width, imageDims.height) : Infinity;
+    return analysis.features.filter(
+      (item) => item.enabled && (item.type !== "BARRENO" || item.radius / analysis.scale < 0.025 * longSide),
+    ).length;
+  }, [analysis, imageDims]);
+
   const canSave =
     Boolean(analysis && partNo.trim() && revision.trim()) &&
-    (!analysis?.enabled.features || activeCount >= 4) &&
+    (!analysis?.enabled.features || anchorCount >= 4) &&
     !saving;
 
   const unit = analysis?.dimensions.unit ?? "mm";
@@ -443,6 +466,9 @@ export default function ReferencePage() {
             ) : photoUrl ? (
               <ZoomableImage
                 onLoad={setImageDims}
+                selection={analysis ? undefined : crop}
+                selectMode={cropMode}
+                onSelection={setCrop}
                 src={correctedUrl ?? photoUrl}
                 alt="Pieza patrón"
                 className="absolute inset-0"
@@ -500,11 +526,15 @@ export default function ReferencePage() {
 
           <div className="flex flex-wrap items-center justify-between gap-2 border-t border-zinc-800 px-4 py-3">
             <p className="text-xs text-zinc-500">
-              {analysis
-                ? addMode
-                  ? "Haga clic sobre la imagen para agregar un feature."
-                  : "Pase el cursor sobre un feature para ver qué es; clic para cambiar su tipo."
-                : "Capture o seleccione una imagen y analícela."}
+              {cropMode
+                ? "Arrastre sobre la imagen para elegir la zona a inspeccionar (rueda: zoom). Pulse Listo al terminar."
+                : analysis
+                  ? addMode
+                    ? "Haga clic sobre la imagen para agregar un feature."
+                    : "Pase el cursor sobre un feature para ver qué es; clic para cambiar su tipo."
+                  : crop
+                    ? `Zona a inspeccionar: ${crop.w} × ${crop.h} px. Pulse Analizar pieza.`
+                    : "Capture o seleccione una imagen y analícela."}
             </p>
             <div className="flex gap-2">
               {source === "camera" && !photo && (
@@ -532,9 +562,39 @@ export default function ReferencePage() {
                 </>
               )}
               {photo && (
-                <button type="button" className={buttonSecondary} onClick={discardPhoto}>
-                  Descartar imagen
-                </button>
+                <>
+                  <button
+                    type="button"
+                    className={`${buttonSecondary} ${cropMode ? "border-emerald-500/60 text-emerald-400" : ""}`}
+                    title="Elegir solo una parte de la pieza para analizar e inspeccionar."
+                    onClick={() => {
+                      if (analysis) {
+                        // El recorte se cambia sobre la foto original: se descarta el análisis actual.
+                        resetAnalysis();
+                        setCropMode(true);
+                      } else {
+                        setCropMode((value) => !value);
+                      }
+                    }}
+                  >
+                    <Crop size={16} /> {cropMode ? "Listo" : crop ? "Cambiar recorte" : "Recortar"}
+                  </button>
+                  {crop && !cropMode && (
+                    <button
+                      type="button"
+                      className={buttonSecondary}
+                      onClick={() => {
+                        resetAnalysis();
+                        setCrop(undefined);
+                      }}
+                    >
+                      Quitar recorte
+                    </button>
+                  )}
+                  <button type="button" className={buttonSecondary} onClick={discardPhoto}>
+                    Descartar imagen
+                  </button>
+                </>
               )}
               {analysis && (
                 <button
@@ -574,9 +634,10 @@ export default function ReferencePage() {
                   <input
                     value={knownLength}
                     onChange={(event) => setKnownLength(event.target.value)}
-                    placeholder="512.7"
+                    placeholder={crop ? "No aplica con recorte" : "512.7"}
                     inputMode="decimal"
-                    className={inputClass}
+                    disabled={Boolean(crop)}
+                    className={`${inputClass} disabled:cursor-not-allowed disabled:opacity-40`}
                   />
                   <select
                     value={knownAxis}
@@ -593,6 +654,12 @@ export default function ReferencePage() {
                   ? "Escaneo 3D listo: sin dimensión conocida, la escala se mide con la profundidad de la cámara."
                   : "Sin dimensión conocida se usa la escala medida en Configuración › Cámara (si existe); si no, las medidas quedan en píxeles."}
               </p>
+              {crop && (
+                <p className="rounded-lg bg-sky-500/10 px-3 py-2 text-xs text-sky-300">
+                  Inspección parcial: solo se analizará y verificará la zona recortada ({crop.w} × {crop.h} px). Contorno y etiqueta
+                  quedan apagados, y la dimensión de la pieza completa no aplica.
+                </p>
+              )}
               {scanInfo && (
                 <p className="rounded-lg bg-emerald-500/10 px-3 py-2 text-xs text-emerald-300">
                   Profundidad capturada: {scanInfo.frames} cuadros, {(scanInfo.valid_fraction * 100).toFixed(0)} % de píxeles
@@ -757,8 +824,11 @@ export default function ReferencePage() {
                     {saving ? <LoaderCircle size={16} className="animate-spin" /> : <CheckCircle2 size={16} />}
                     {saving ? "Guardando..." : "Guardar pieza patrón"}
                   </button>
-                  {analysis.enabled.features && activeCount < 4 && (
-                    <p className="text-xs text-amber-400">Se necesitan al menos 4 features activos para alinear.</p>
+                  {analysis.enabled.features && anchorCount < 4 && (
+                    <p className="text-xs text-amber-400">
+                      Se necesitan al menos 4 features pequeños activos (insertos, delrones o barrenos chicos) para alinear; el
+                      hueco grande no cuenta. Hay {anchorCount}.{crop ? " Amplíe el recorte." : ""}
+                    </p>
                   )}
                   {saved && (
                     <p className="rounded-lg border border-emerald-500/30 bg-emerald-500/10 px-3 py-2 text-xs text-emerald-300">

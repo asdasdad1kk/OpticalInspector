@@ -16,7 +16,7 @@ from typing import Any
 import cv2
 import numpy as np
 
-from .pipeline import LARGE_HOLE_MIN_PX, classify_color, classify_feature_type, classify_large_hole, measure_radius
+from .pipeline import LARGE_HOLE_FRACTION, LARGE_HOLE_MIN_PX, MIN_ANCHORS, classify_color, classify_feature_type, classify_large_hole, measure_radius
 from .registration import detect_blob_candidates
 
 FEATURE_CATEGORIES = ("features", "contour", "distances", "label")
@@ -365,6 +365,13 @@ def analyze_reference(
     filled = np.zeros((height, width), np.uint8)
     cv2.fillPoly(filled, [contour.astype(np.int32)], 255)
     raw_features += detect_large_holes(image, filled, raw_features)
+    anchors = [f for f in raw_features if f["type"] != "BARRENO" or f["radius_px"] < LARGE_HOLE_FRACTION * max(width, height)]
+    if len(anchors) < MIN_ANCHORS:
+        raise ValueError(
+            f"Solo hay {len(anchors)} features pequeños (insertos, delrones o barrenos chicos) en la zona analizada; "
+            f"se necesitan al menos {MIN_ANCHORS} para alinear la pieza (un hueco grande no sirve para alinear). "
+            "Amplíe el recorte, mejore la iluminación o enfoque."
+        )
 
     rect = cv2.minAreaRect(contour)
     long_px = max(rect[1])

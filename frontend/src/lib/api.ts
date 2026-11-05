@@ -1,4 +1,4 @@
-import type { InspectionOptions, ReferenceAnalysis, CameraDevice, CameraProvider, CameraStatus, DatabaseResponse, DrawingRecord, InspectionDetail, InspectionRecord, InspectionResponse, PartModelResponse, PartRecord, ScanInfo, UploadResponse } from "../types/api";
+import type { InspectionOptions, ReferenceAnalysis, CameraDevice, CameraProvider, CameraStatus, DatabaseResponse, DrawingRecord, InspectionDetail, InspectionRecord, InspectionResponse, PartModelResponse, PartRecord, ScanInfo, UploadResponse, CropRect } from "../types/api";
 
 export const API_URL = import.meta.env.VITE_API_URL ?? "http://127.0.0.1:8000";
 export const WS_URL = import.meta.env.VITE_WS_URL ?? "ws://127.0.0.1:8000";
@@ -192,10 +192,12 @@ export async function analyzeReference(
   knownLength: number | undefined,
   knownAxis: "long" | "short",
   scanId?: string,
+  crop?: CropRect,
 ): Promise<ReferenceAnalysis> {
   const form = new FormData();
   form.append("photo", photo);
   if (scanId) form.append("scan_id", scanId);
+  if (crop) form.append("crop", JSON.stringify([crop.x, crop.y, crop.w, crop.h]));
   if (knownLength) form.append("known_length", String(knownLength));
   form.append("known_axis", knownAxis);
   const response = await fetch(`${API_URL}/reference/analyze`, { method: "POST", body: form });
@@ -210,10 +212,12 @@ export async function saveReference(data: {
   description: string;
   reference: Omit<ReferenceAnalysis, "preview_png">;
   scanId?: string;
+  crop?: CropRect;
 }): Promise<UploadResponse> {
   const form = new FormData();
   form.append("photo", data.photo);
   if (data.scanId) form.append("scan_id", data.scanId);
+  if (data.crop) form.append("crop", JSON.stringify([data.crop.x, data.crop.y, data.crop.w, data.crop.h]));
   form.append("part_no", data.partNo.trim());
   form.append("revision", data.revision.trim());
   form.append("description", data.description.trim());

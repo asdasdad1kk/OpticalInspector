@@ -11,6 +11,7 @@ import {
   LogOut,
   Play,
   CircleStop,
+  RotateCcw,
   Ruler,
   SlidersHorizontal,
   Trash2,
@@ -35,6 +36,7 @@ import {
 } from "../lib/configApi";
 import { getCameraStatus, startCamera, stopCamera } from "../lib/api";
 import { useCameraStream } from "../hooks/useCameraStream";
+import { resetCameraOptions } from "../components/CameraSelector";
 import type { CameraStatus } from "../types/api";
 
 // ============================================================
@@ -112,6 +114,84 @@ function Toggle({ label, checked, onChange }: { label: string; checked: boolean;
 // ============================================================
 // ACCESO
 // ============================================================
+
+interface ResetResult {
+  camera_restarted: boolean | null;
+  camera_error: string | null;
+}
+
+/** Restablece la configuracion de fabrica; las piezas, inspecciones y la clave no se tocan. */
+function ResetDialog({
+  guard, onClose, onDone,
+}: { guard: Guard; onClose: () => void; onDone: (result: ResetResult) => void }) {
+  const [options, setOptions] = useState({ general: true, parts: true, calibration: true });
+  const [busy, setBusy] = useState(false);
+  const nothing = !options.general && !options.parts && !options.calibration;
+
+  async function confirm() {
+    setBusy(true);
+    const result = await guard(() => cfgSend<ResetResult>("/reset", "POST", options));
+    setBusy(false);
+    if (result) {
+      if (options.general) resetCameraOptions();
+      onDone(result);
+    }
+  }
+
+  const choices: { key: keyof typeof options; title: string; detail: string }[] = [
+    {
+      key: "general",
+      title: "Ajustes generales",
+      detail: "Tolerancias y compuertas de calidad, parámetros fijos de la cámara (exposición, enfoque), DXF, respaldos y la cámara/resolución elegida en este equipo.",
+    },
+    { key: "parts", title: "Ajustes por número de parte", detail: "Las tolerancias propias de cada pieza vuelven a las generales." },
+    { key: "calibration", title: "Calibración", detail: "Calibración del lente y escala del plano: habrá que volver a calibrar." },
+  ];
+
+  return (
+    <div onClick={onClose} className="fixed inset-0 z-[100] grid place-items-center bg-black/80 p-4 backdrop-blur-sm">
+      <div onClick={(event) => event.stopPropagation()} className="w-full max-w-lg rounded-2xl border border-zinc-700 bg-zinc-950 p-6 shadow-2xl">
+        <h2 className="flex items-center gap-2 text-lg font-semibold">
+          <RotateCcw size={18} className="text-red-400" /> Restablecer configuración
+        </h2>
+        <p className="mt-2 text-sm text-zinc-400">
+          Vuelve a los valores de fábrica. <b className="text-zinc-200">No</b> borra las piezas dadas de alta, las inspecciones ni la clave
+          de configuración. Si la cámara está encendida se reinicia para aplicar los cambios.
+        </p>
+        <div className="mt-4 space-y-2">
+          {choices.map((choice) => (
+            <label key={choice.key} className="flex cursor-pointer items-start gap-3 rounded-lg border border-zinc-800 bg-zinc-900/60 p-3 text-sm">
+              <input
+                type="checkbox"
+                className="mt-0.5 accent-red-500"
+                checked={options[choice.key]}
+                onChange={(event) => setOptions((current) => ({ ...current, [choice.key]: event.target.checked }))}
+              />
+              <span>
+                <span className="font-medium text-zinc-100">{choice.title}</span>
+                <span className="mt-0.5 block text-xs text-zinc-500">{choice.detail}</span>
+              </span>
+            </label>
+          ))}
+        </div>
+        <div className="mt-5 flex justify-end gap-2">
+          <button type="button" className={secondary} onClick={onClose} disabled={busy}>
+            Cancelar
+          </button>
+          <button
+            type="button"
+            onClick={confirm}
+            disabled={busy || nothing}
+            className="inline-flex items-center justify-center gap-2 rounded-lg bg-red-500 px-4 py-2 text-sm font-semibold text-white transition hover:bg-red-400 disabled:cursor-not-allowed disabled:opacity-40"
+          >
+            {busy ? <LoaderCircle size={16} className="animate-spin" /> : <RotateCcw size={16} />}
+            Restablecer
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
 
 function LoginGate({ onSuccess }: { onSuccess: (defaultPassword: boolean) => void }) {
   const [password, setPassword] = useState("");
@@ -698,6 +778,7 @@ export default function SettingsPage() {
   const [tab, setTab] = useState<Tab>("inspection");
   const [error, setError] = useState<string>();
   const [notice, setNotice] = useState<string>();
+  const [resetOpen, setResetOpen] = useState(false);
 
   const logout = useCallback(() => {
     configSession.clear();
@@ -754,10 +835,40 @@ export default function SettingsPage() {
           <p className="text-sm font-medium text-emerald-400">Administración</p>
           <h1 className="mt-1 text-3xl font-semibold tracking-tight">Configuración</h1>
         </div>
-        <button type="button" className={secondary} onClick={() => guard(async () => { await cfgSend("/logout", "POST"); }).finally(logout)}>
-          <LogOut size={16} /> Cerrar sesión
-        </button>
+        <div className="flex flex-wrap gap-2">
+          <button
+            type="button"
+            className="inline-flex items-center justify-center gap-2 rounded-lg border border-red-500/40 bg-red-500/10 px-4 py-2 text-sm font-semibold text-red-300 transition hover:bg-red-500/20"
+            onClick={() => setResetOpen(true)}
+          >
+            <RotateCcw size={16} /> Restablecer configuración
+          </button>
+          <button type="button" className={secondary} onClick={() => guard(async () => { await cfgSend("/logout", "POST"); }).finally(logout)}>
+            <LogOut size={16} /> Cerrar sesión
+          </button>
+        </div>
       </div>
+
+      {resetOpen && (
+        <ResetDialog
+          guard={guard}
+          onClose={() => setResetOpen(false)}
+          onDone={(result) => {
+            setResetOpen(false);
+            loadSettings();
+            if (result.camera_error) {
+              setError(`Configuración restablecida, pero la cámara no se pudo reiniciar: ${result.camera_error}`);
+            } else {
+              setNotice(
+                result.camera_restarted
+                  ? "Configuración restablecida a valores de fábrica y cámara reiniciada."
+                  : "Configuración restablecida a valores de fábrica.",
+              );
+              window.setTimeout(() => setNotice(undefined), 6000);
+            }
+          }}
+        />
+      )}
 
       {defaultPassword && (
         <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 px-4 py-3 text-sm text-amber-300">

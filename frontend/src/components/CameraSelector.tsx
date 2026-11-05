@@ -26,6 +26,15 @@ export function loadCameraOptions(): CameraStartOptions {
   return { provider: "realsense", width: 1280, height: 720 };
 }
 
+/** Olvida la camara/resolucion guardadas en este equipo (vuelve a RealSense 1280x720). */
+export function resetCameraOptions() {
+  try {
+    localStorage.removeItem(STORAGE_KEY);
+  } catch {
+    /* sin almacenamiento disponible */
+  }
+}
+
 interface Props {
   value: CameraStartOptions;
   onChange: (value: CameraStartOptions) => void;

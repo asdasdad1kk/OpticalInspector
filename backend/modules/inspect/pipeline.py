@@ -71,6 +71,17 @@ def check_image_quality(image: np.ndarray, options: dict[str, Any]) -> dict[str,
 TYPE_BRASS = {"DELRON_CONICO", "DELRON_PLANO"}
 
 
+# Fraccion del tamano de la pieza (lado mayor) desde la cual un barreno es un "hueco grande".
+LARGE_HOLE_FRACTION = 0.025
+# Features necesarios para alinear la foto con la pieza patron.
+MIN_ANCHORS = 4
+
+
+def is_anchor(item: dict[str, Any], extent: float) -> bool:
+    """Los huecos grandes no son puntos detectables (no son blobs): no sirven para alinear."""
+    return not (item["type"] == "BARRENO" and float(item["radius"]) >= LARGE_HOLE_FRACTION * extent)
+
+
 def merge_options(options: dict[str, Any] | None) -> dict[str, Any]:
     merged = dict(DEFAULT_OPTIONS)
     if options:
@@ -774,16 +785,20 @@ def run_pipeline(
     ref_points = np.float64([[item["x"], -item["y"]] for item in items])
     candidates = detect_blob_candidates(image)
     extent = (bounds[1] - bounds[0], bounds[3] - bounds[2])
-    registration = register(ref_points, candidates, (image_width, image_height), extent)
+    # Solo los features pequenos alinean; los huecos grandes se miden despues, ya alineados.
+    anchor_index = [i for i, item in enumerate(items) if is_anchor(item, max(extent))] or list(range(len(items)))
+    registration = register(ref_points[anchor_index], candidates, (image_width, image_height), extent)
+    if registration is not None:
+        registration["pairs"] = [(anchor_index[r], c, d) for r, c, d in registration["pairs"]]
     if registration is None or registration["inliers"] < 4:
         raise InconclusiveError(
             "No fue posible alinear la pieza: se detectaron muy pocos features "
             "coincidentes con la referencia. Verifique encuadre, enfoque e iluminacion."
         )
-    inlier_fraction = registration["inliers"] / len(items)
+    inlier_fraction = registration["inliers"] / len(anchor_index)
     if inlier_fraction < options["min_inlier_fraction"]:
         raise InconclusiveError(
-            f"Alineacion poco confiable: solo {registration['inliers']} de {len(items)} features "
+            f"Alineacion poco confiable: solo {registration['inliers']} de {len(anchor_index)} features "
             f"coinciden ({inlier_fraction * 100:.0f}% < {options['min_inlier_fraction'] * 100:.0f}%). "
             "Puede ser un encuadre incorrecto o una pieza distinta a la dada de alta."
         )

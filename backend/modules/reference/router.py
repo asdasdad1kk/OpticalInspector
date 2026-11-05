@@ -13,6 +13,7 @@ from core import config, storage
 from core.db import get_session
 from models import Drawing, Part
 from modules.camera import scans
+from modules.inspect.pipeline import LARGE_HOLE_FRACTION, MIN_ANCHORS
 from modules.inspect.golden import DEFAULT_ENABLED, analyze_reference, draw_reference_preview, rescale_analysis
 from modules.reference import relief as relief_lib
 from modules.inspect.calibration import calibration_service
@@ -40,6 +41,31 @@ def _serialize(analysis: dict[str, Any]) -> dict[str, Any]:
         "scale_source": analysis.get("scale_source", "dimension"),
         "preview_png": base64.b64encode(encode_png(analysis["preview"])).decode("ascii"),
     }
+
+
+def _parse_crop(raw: str | None, width: int, height: int) -> tuple[int, int, int, int] | None:
+    """Recorte [x, y, ancho, alto] en pixeles de la imagen; ValueError si no es usable."""
+    if not raw:
+        return None
+    try:
+        x, y, w, h = (int(round(float(value))) for value in json.loads(raw))
+    except (ValueError, TypeError, json.JSONDecodeError) as error:
+        raise ValueError("El recorte es inválido.") from error
+    x, y = max(0, x), max(0, y)
+    w, h = min(w, width - x), min(h, height - y)
+    if w < 160 or h < 120 or w * h < 0.03 * width * height:
+        raise ValueError("El recorte es demasiado pequeño: debe contener varios features y al menos 3 % de la imagen.")
+    return x, y, w, h
+
+
+def _crop_scan(scan: dict[str, Any], rect: tuple[int, int, int, int]) -> dict[str, Any]:
+    """Recorta color y profundidad a la vez y mueve el punto principal de los intrinsecos."""
+    x, y, w, h = rect
+    depth = scan["depth_mm"][y:y + h, x:x + w]
+    intrinsics = {**scan["intrinsics"], "ppx": scan["intrinsics"]["ppx"] - x, "ppy": scan["intrinsics"]["ppy"] - y,
+                  "width": w, "height": h}
+    return {**scan, "color": scan["color"][y:y + h, x:x + w], "depth_mm": depth, "intrinsics": intrinsics,
+            "depth_raw": relief_lib.pack_depth(depth)}
 
 
 def _measure_relief(scan: dict[str, Any], analysis: dict[str, Any], use_depth_scale: bool) -> dict[str, Any]:
@@ -70,6 +96,7 @@ async def analyze(
     known_length: float | None = Form(default=None),
     known_axis: str = Form(default="long"),
     scan_id: str | None = Form(default=None),
+    crop: str | None = Form(default=None, description="JSON [x, y, ancho, alto] de la zona a inspeccionar"),
 ) -> dict[str, Any]:
     """Analiza una captura de la pieza real y devuelve todos sus features.
 
@@ -92,12 +119,18 @@ async def analyze(
         except scans.ScanNotFound as error:
             raise HTTPException(status_code=404, detail=str(error)) from error
 
+    rect: tuple[int, int, int, int] | None = None
     try:
         if scan is not None:
             # Con escaneo 3D se usan los intrinsecos de fabrica de la RealSense: no se aplica
             # la calibracion de lente del usuario, para que color y profundidad sigan alineados.
+            rect = _parse_crop(crop, scan["color"].shape[1], scan["color"].shape[0])
+            if rect:
+                scan = _crop_scan(scan, rect)
             raw = image = scan["color"]
             undistorted = False
+            if rect and known_length:
+                raise ValueError("Con recorte no se puede indicar una dimensión conocida de la pieza completa.")
             analysis = analyze_reference(image, known_length, known_axis, None)
         else:
             raw = decode_image(data)
@@ -106,9 +139,16 @@ async def analyze(
             plane_scale = None
             if not known_length:
                 plane_scale = calibration_service.plane_scale_for((image.shape[1], image.shape[0]))
+            rect = _parse_crop(crop, image.shape[1], image.shape[0])
+            if rect:
+                if known_length:
+                    raise ValueError("Con recorte no se puede indicar una dimensión conocida de la pieza completa.")
+                x, y, w, h = rect
+                image = image[y:y + h, x:x + w]
             analysis = analyze_reference(image, known_length, known_axis, plane_scale)
     except ValueError as error:
-        raise HTTPException(status_code=400, detail=str(error)) from error
+        hint = " Amplíe la zona recortada." if rect and "recorte" not in str(error).lower() else ""
+        raise HTTPException(status_code=400, detail=f"{error}{hint}") from error
     except Exception as error:
         raise HTTPException(status_code=500, detail=f"Error analizando la pieza: {error}") from error
     relief_payload: dict[str, Any] | None = None
@@ -117,11 +157,17 @@ async def analyze(
             relief_payload = _measure_relief(scan, analysis, use_depth_scale=not known_length)
         except Exception as error:  # la medicion de profundidad nunca debe impedir el alta
             relief_payload = {"available": False, "reason": f"No se pudo medir el relieve: {error}"}
+    if rect:
+        # El contorno y la etiqueta de una pieza recortada no son los de la pieza completa:
+        # arrancan desactivados (el usuario puede volver a activarlos).
+        analysis["enabled"] = {**analysis["enabled"], "contour": False, "label": False}
     payload = _serialize(analysis)
+    if rect:
+        payload["crop"] = list(rect)
     if relief_payload is not None:
         payload["relief"] = relief_payload
         payload["scan_id"] = scan_id
-    if undistorted:
+    if undistorted or rect:
         # Las coordenadas estan en la imagen corregida: el cliente debe mostrarla.
         ok, encoded = cv2.imencode(".jpg", image, [cv2.IMWRITE_JPEG_QUALITY, 92])
         payload["image_jpeg"] = base64.b64encode(encoded.tobytes()).decode("ascii") if ok else None
@@ -136,6 +182,7 @@ async def save(
     reference: str = Form(..., description="JSON editado devuelto por /analyze"),
     photo: UploadFile = File(...),
     scan_id: str | None = Form(default=None),
+    crop: str | None = Form(default=None),
     session: Session = Depends(get_session),
 ) -> dict[str, Any]:
     """Guarda la pieza patron (features editados) como un Drawing de origen real."""
@@ -154,7 +201,7 @@ async def save(
 
     active = [f for f in features if f.get("enabled", True)]
     enabled = {**DEFAULT_ENABLED, **(payload.get("enabled") or {})}
-    if enabled["features"] and len(active) < 4:
+    if enabled["features"] and len(active) < MIN_ANCHORS:
         raise HTTPException(status_code=422, detail="Se necesitan al menos 4 features activos.")
 
     scan = None
@@ -167,8 +214,30 @@ async def save(
     photo_bytes = await photo.read()
     try:
         image = scan["color"] if scan is not None else prepare_image(photo_bytes)
+        rect = _parse_crop(crop, image.shape[1], image.shape[0])
+        if rect:
+            if scan is not None:
+                scan = _crop_scan(scan, rect)
+                image = scan["color"]
+            else:
+                x, y, w, h = rect
+                image = image[y:y + h, x:x + w]
     except ValueError as error:
         raise HTTPException(status_code=400, detail=str(error)) from error
+
+    # Los huecos grandes no alinean: hacen falta al menos MIN_ANCHORS features pequenos activos.
+    anchor_scale = float(payload.get("scale", 1.0)) or 1.0
+    long_side_px = max(image.shape[:2])
+    anchors = [
+        f for f in active
+        if f["type"] != "BARRENO" or f["radius"] / anchor_scale < LARGE_HOLE_FRACTION * long_side_px
+    ]
+    if enabled["features"] and len(anchors) < MIN_ANCHORS:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Solo hay {len(anchors)} features pequeños activos; se necesitan al menos {MIN_ANCHORS} para "
+                   "alinear (un hueco grande no sirve para alinear).",
+        )
 
     scale = float(payload.get("scale", 1.0)) or 1.0
     # Foto limpia (sin anotaciones) como textura del modelo 3D; sus coordenadas son las del analisis.
@@ -246,6 +315,7 @@ async def save(
                     "relative": bool(payload.get("relative", False)),
                     "enabled": enabled,
                     "photo_path": photo_path,
+                    "crop": list(rect) if rect else None,
                     "image_size": [int(image.shape[1]), int(image.shape[0])],
                     "relief_path": relief_path,
                     "depth_path": depth_path,

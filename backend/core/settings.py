@@ -199,6 +199,17 @@ class SettingsStore:
             self._load()[section].update(clean)
             self._save()
 
+    def reset(self, general: bool = True, parts: bool = True) -> None:
+        """Vuelve a los valores de fabrica. La clave de configuracion NO se toca."""
+        with self._lock:
+            data = self._load()
+            if general:
+                for section in ("inspection", "camera", "calibration", "dxf", "backup"):
+                    data[section] = copy.deepcopy(DEFAULTS[section])
+            if parts:
+                data["parts"] = {}
+            self._save()
+
     def set_part_overrides(self, part_number: str, values: dict[str, Any] | None) -> None:
         part_number = part_number.strip()
         if not part_number:

@@ -21,6 +21,14 @@ export interface ImageMarker {
   dim?: boolean;
 }
 
+/** Rectangulo en pixeles de la imagen original. */
+export interface ImageRect {
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+}
+
 export interface ZoomableImageHandle {
   /** Centra y acerca la vista sobre un marcador y fija su tooltip. */
   focusMarker: (key: string | number) => void;
@@ -39,6 +47,11 @@ interface ZoomableImageProps {
   onImageClick?: (x: number, y: number) => void;
   crosshair?: boolean;
   onLoad?: (size: { width: number; height: number }) => void;
+  /** Recorte mostrado: lo de afuera se atenua. */
+  selection?: ImageRect | null;
+  /** Con `selectMode` arrastrar dibuja un nuevo rectangulo en vez de mover la imagen. */
+  selectMode?: boolean;
+  onSelection?: (rect: ImageRect) => void;
 }
 
 interface View {
@@ -51,7 +64,7 @@ const MAX_ZOOM = 20;
 const TOOLTIP_WIDTH = 272;
 
 const ZoomableImage = forwardRef<ZoomableImageHandle, ZoomableImageProps>(function ZoomableImage(
-  { src, alt, className = "", markers = [], renderTooltip, overlay, onImageClick, crosshair, onLoad },
+  { src, alt, className = "", markers = [], renderTooltip, overlay, onImageClick, crosshair, onLoad, selection, selectMode, onSelection },
   ref,
 ) {
   const containerRef = useRef<HTMLDivElement>(null);
@@ -61,6 +74,8 @@ const ZoomableImage = forwardRef<ZoomableImageHandle, ZoomableImageProps>(functi
   const [hovered, setHovered] = useState<string | number | null>(null);
   const [pinned, setPinned] = useState<string | number | null>(null);
   const [dragging, setDragging] = useState(false);
+  const [draft, setDraft] = useState<ImageRect | null>(null);
+  const selectStart = useRef<{ x: number; y: number } | null>(null);
 
   const tooltipRef = useRef<HTMLDivElement>(null);
   const [tooltipHeight, setTooltipHeight] = useState(160);
@@ -153,8 +168,28 @@ const ZoomableImage = forwardRef<ZoomableImageHandle, ZoomableImageProps>(functi
     return { x: event.clientX - rect.left, y: event.clientY - rect.top };
   }
 
+  /** Punto del puntero en coordenadas de la imagen, limitado a sus bordes. */
+  function naturalPoint(event: React.PointerEvent) {
+    const point = localPoint(event);
+    const current = viewRef.current;
+    return {
+      x: Math.max(0, Math.min(natural?.width ?? 0, (point.x - current.tx) / current.s)),
+      y: Math.max(0, Math.min(natural?.height ?? 0, (point.y - current.ty) / current.s)),
+    };
+  }
+
+  function rectBetween(a: { x: number; y: number }, b: { x: number; y: number }): ImageRect {
+    return { x: Math.min(a.x, b.x), y: Math.min(a.y, b.y), w: Math.abs(a.x - b.x), h: Math.abs(a.y - b.y) };
+  }
+
   function handlePointerDown(event: React.PointerEvent<HTMLDivElement>) {
     if (event.button !== 0) return;
+    if (selectMode && natural && pointers.current.size === 0) {
+      event.currentTarget.setPointerCapture(event.pointerId);
+      selectStart.current = naturalPoint(event);
+      setDraft({ ...selectStart.current, w: 0, h: 0 });
+      return;
+    }
     event.currentTarget.setPointerCapture(event.pointerId);
     pointers.current.set(event.pointerId, localPoint(event));
     gesture.current = { moved: 0 };
@@ -162,6 +197,10 @@ const ZoomableImage = forwardRef<ZoomableImageHandle, ZoomableImageProps>(functi
   }
 
   function handlePointerMove(event: React.PointerEvent<HTMLDivElement>) {
+    if (selectStart.current) {
+      setDraft(rectBetween(selectStart.current, naturalPoint(event)));
+      return;
+    }
     const previous = pointers.current.get(event.pointerId);
     if (!previous) return;
     const point = localPoint(event);
@@ -189,6 +228,16 @@ const ZoomableImage = forwardRef<ZoomableImageHandle, ZoomableImageProps>(functi
   }
 
   function handlePointerUp(event: React.PointerEvent<HTMLDivElement>) {
+    if (selectStart.current) {
+      const rect = rectBetween(selectStart.current, naturalPoint(event));
+      selectStart.current = null;
+      setDraft(null);
+      // Un clic sin arrastre no cambia el recorte.
+      if (rect.w >= 20 && rect.h >= 20) {
+        onSelection?.({ x: Math.round(rect.x), y: Math.round(rect.y), w: Math.round(rect.w), h: Math.round(rect.h) });
+      }
+      return;
+    }
     if (!pointers.current.has(event.pointerId)) return;
     pointers.current.delete(event.pointerId);
     if (pointers.current.size > 0) return;
@@ -247,7 +296,7 @@ const ZoomableImage = forwardRef<ZoomableImageHandle, ZoomableImageProps>(functi
     <div
       ref={containerRef}
       className={`${/\b(absolute|fixed)\b/.test(className) ? "" : "relative"} touch-none select-none overflow-hidden bg-black ${
-        crosshair ? "cursor-crosshair" : view.s > fit + 1e-6 ? (dragging ? "cursor-grabbing" : "cursor-grab") : ""
+        crosshair || selectMode ? "cursor-crosshair" : view.s > fit + 1e-6 ? (dragging ? "cursor-grabbing" : "cursor-grab") : ""
       } ${className}`}
       onPointerDown={handlePointerDown}
       onPointerMove={handlePointerMove}
@@ -276,9 +325,48 @@ const ZoomableImage = forwardRef<ZoomableImageHandle, ZoomableImageProps>(functi
             onLoad?.(size);
           }}
         />
-        {natural && (overlay || markers.length > 0) && (
+        {natural && (overlay || markers.length > 0 || draft || selection) && (
           <svg viewBox={`0 0 ${natural.width} ${natural.height}`} className="absolute inset-0 h-full w-full overflow-visible">
             {overlay}
+            {(draft ?? selection) && (
+              <g pointerEvents="none">
+                {(() => {
+                  const r = (draft ?? selection)!;
+                  return (
+                    <>
+                      <path
+                        d={`M0 0H${natural.width}V${natural.height}H0Z M${r.x} ${r.y}h${r.w}v${r.h}h${-r.w}Z`}
+                        fill="rgba(0,0,0,0.6)"
+                        fillRule="evenodd"
+                      />
+                      <rect
+                        x={r.x}
+                        y={r.y}
+                        width={r.w}
+                        height={r.h}
+                        fill="none"
+                        stroke="#34d399"
+                        strokeWidth={2}
+                        strokeDasharray="8 5"
+                        vectorEffect="non-scaling-stroke"
+                      />
+                      <text
+                        x={r.x + 4 / view.s}
+                        y={r.y + 16 / view.s}
+                        fill="#34d399"
+                        stroke="#000"
+                        strokeWidth={3 / view.s}
+                        paintOrder="stroke"
+                        fontSize={13 / view.s}
+                        fontWeight={700}
+                      >
+                        {Math.round(r.w)} × {Math.round(r.h)} px
+                      </text>
+                    </>
+                  );
+                })()}
+              </g>
+            )}
             {markers.map((marker) => {
               const active = marker.key === activeKey;
               return (

@@ -88,6 +88,47 @@ def put_settings(section: str, values: dict[str, Any]) -> dict[str, Any]:
     return get_settings()
 
 
+class ResetBody(BaseModel):
+    general: bool = True
+    parts: bool = True
+    calibration: bool = True
+
+
+@router.post("/reset", dependencies=protected)
+def reset_configuration(body: ResetBody) -> dict[str, Any]:
+    """Restablece la configuracion de fabrica (sin tocar piezas, inspecciones ni la clave)."""
+    settings_store.reset(general=body.general, parts=body.parts)
+    if body.calibration:
+        calibration_service.delete()
+        calibration_service.reset_session()
+
+    camera_restarted: bool | None = None
+    camera_error: str | None = None
+    current = camera_service.status
+    if body.general and current["running"]:
+        # Los parametros fijos de exposicion/enfoque se aplican al abrir la camara.
+        try:
+            camera_service.restart(
+                width=current["width"], height=current["height"], fps=current["fps"],
+                preview_quality=current["preview_quality"], provider=current["provider"],
+                device_index=current["device_index"],
+            )
+            camera_restarted = True
+        except (ValueError, RuntimeError) as error:
+            camera_restarted, camera_error = False, str(error)
+
+    settings = get_settings()
+    return {
+        "ok": True,
+        "general": body.general,
+        "parts": body.parts,
+        "calibration": body.calibration,
+        "camera_restarted": camera_restarted,
+        "camera_error": camera_error,
+        "settings": settings,
+    }
+
+
 # ============================================================
 # PIEZAS: ajustes propios y piezas buenas
 # ============================================================
