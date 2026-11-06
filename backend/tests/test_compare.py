@@ -93,6 +93,37 @@ def test_flow() -> None:
     print("flujo alta / inspeccion / explicacion: OK")
 
 
+def test_golden_is_a_crop_of_the_photo() -> None:
+    """El patron es un recorte; la inspeccion usa la foto COMPLETA (sin recortar): el recorte se busca solo."""
+    photo = cv2.imread(str(BRIO))
+    crop = (1480, 320, 360, 240)  # extremo derecho de la pieza
+    created = client.post("/api/compare/parts", data={"name": "Extremo", "crop": crop_form(crop)}, files={"photo": ("a.jpg", jpeg(photo), "image/jpeg")})
+    assert created.status_code == 200, created.text
+    h, w = photo.shape[:2]
+    for angle, scale, dx, dy in ((0, 1.0, 0, 0), (25, 0.85, 120, -60), (-40, 0.9, -150, 120)):
+        matrix = cv2.getRotationMatrix2D((w / 2, h / 2), angle, scale)
+        matrix[0, 2] += dx
+        matrix[1, 2] += dy
+        shot = cv2.warpAffine(photo, matrix, (w, h), borderMode=cv2.BORDER_REPLICATE)
+        answer = client.post("/api/compare/inspect", data={"part_name": "Extremo"}, files={"photo": ("b.jpg", jpeg(shot), "image/jpeg")})
+        assert answer.status_code == 200, (angle, answer.text)
+        report = answer.json()
+        assert report["status"] == "OK", (angle, report["summary"])
+        assert abs(report["alignment"]["rotation_deg"] + angle) < 3, report["alignment"]
+        assert report["located"]["area_fraction"] < 0.2 and len(report["located"]["polygon"]) == 4
+        assert client.get(f"/api{report['images']['located']}").status_code == 200
+    # Defecto en la zona del patron, con la foto completa.
+    defective = photo.copy()
+    cv2.circle(defective, (1600, 420), 10, (30, 30, 30), -1)
+    answer = client.post("/api/compare/inspect", data={"part_name": "Extremo"}, files={"photo": ("c.jpg", jpeg(defective), "image/jpeg")})
+    assert answer.status_code == 200 and answer.json()["regions"], answer.text
+    # Una foto donde NO esta el patron: no concluyente, no un veredicto inventado.
+    other = cv2.imread(str(BACKEND / "tests" / "panel1.png"))
+    answer = client.post("/api/compare/inspect", data={"part_name": "Extremo"}, files={"photo": ("o.jpg", jpeg(other), "image/jpeg")})
+    assert answer.status_code == 422 and "NO CONCLUYENTE" in answer.json()["detail"], answer.text
+    print("patron recortado, inspeccion con foto completa (cualquier posicion/giro): OK")
+
+
 def test_errors() -> None:
     photo = cv2.imread(str(BRIO))
     assert client.post("/api/compare/parts", data={"name": "  "}, files={"photo": ("a.jpg", jpeg(photo), "image/jpeg")}).status_code == 400
@@ -149,6 +180,7 @@ def test_separate_database() -> None:
 
 if __name__ == "__main__":
     test_flow()
+    test_golden_is_a_crop_of_the_photo()
     test_errors()
     test_thin_pen_mark()
     test_separate_database()

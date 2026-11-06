@@ -13,6 +13,8 @@ Menú **Comparador** (`/compare`).
    (la anterior se conserva y se puede eliminar).
 2. **Inspeccionar**: tomar la foto → recortar el área → elegir la pieza (por nombre) → *Inspeccionar*.
 
+**El patrón puede ser solo un recorte y la inspección puede usar la foto completa**: el sistema busca el patrón dentro de la foto (cualquier posición, giro o tamaño), lo alinea y analiza desde ahí; en «Ubicación en la foto» se ve dónde lo encontró. Recortar en la inspección es opcional (acelera y evita fondos parecidos).
+
 No hay que alinear, calibrar ni marcar nada: la foto puede estar en otra posición, girada o a otra distancia,
 y el recorte no tiene que ser idéntico (debe incluir toda el área del patrón).
 
@@ -25,7 +27,7 @@ Si la foto no permite decidir (no se alinea, está borrosa, muy oscura, demasiad
 
 ## Cómo compara (`modules/compare/engine.py`)
 
-1. **Alineación**: puntos SIFT + RANSAC (similitud; homografía si hay muchos puntos) y afinado ECC sobre bordes.
+1. **Búsqueda y alineación**: la foto se conserva grande (`SEARCH_SIDE`, 3200 px) para buscar el patrón; puntos SIFT con votación de giro/escala + RANSAC (similitud; homografía si hay muchos puntos) y afinado ECC sobre bordes.
    Cobertura mínima del patrón: `MIN_COVERAGE` (0.80).
 2. **Luz**: se iguala el color global y se corrige un campo suave de brillo (celdas grandes con mediana, así un
    defecto chico no se «normaliza»).
@@ -49,6 +51,7 @@ Si la foto no permite decidir (no se alinea, está borrosa, muy oscura, demasiad
 | Desplazamiento tolerado | `TOLERANCE_FRACTION` | más alto = admite más movimiento entre fotos (y detecta menos desplazamientos pequeños) |
 | Brillos quemados | `SATURATED_L` (247), `MAX_EXCLUDED` | qué se considera reflejo y cuánto puede haber |
 | Calidad mínima de la foto | `limits` en `compare()` | nitidez, brillo, contraste, % saturado (también por `min_quality`) |
+| Búsqueda del patrón en la foto | `SEARCH_SIDE`, `MIN_MATCHES` (14), `MIN_ECC` (0.30) | más puntos mínimos / más correlación = más estricto para aceptar que «ahí está la pieza»; si no la encuentra en fotos reales, baje `MIN_MATCHES` (ej. 10) |
 | Tamaño de trabajo | `WORK_SIDE` (1400 px) | más alto = detecta cosas más finas, más lento |
 | Textos de causas y tipos | `_explain`, `KIND_LABEL` | para afinar el lenguaje o agregar tipos |
 

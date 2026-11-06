@@ -26,8 +26,10 @@ import numpy as np
 # ---------------------------------------------------------------------------
 
 WORK_SIDE = 1400                # lado mayor (px) con el que se compara
+SEARCH_SIDE = 3200              # lado mayor (px) de la foto en la que se BUSCA el patron (puede ser mucho mas grande que el recorte)
 MIN_INPUT_SIDE = 80             # una foto o recorte mas chico no sirve
 MIN_MATCHES = 14                # coincidencias RANSAC minimas para aceptar el alineamiento por puntos
+MIN_ECC = 0.30                  # correlacion minima de bordes tras alinear: menos = no es la misma pieza
 MIN_COVERAGE = 0.80             # fraccion del patron que debe quedar cubierta por la foto alineada
 MAX_EXCLUDED = 0.45             # fraccion maxima excluida (brillos saturados / sin dato) para poder decidir
 SATURATED_L = 247.0             # L (0-255) desde la cual un pixel se considera reflejo/quemado
@@ -60,6 +62,9 @@ class Alignment:
     matches: int
     ecc: float | None
     coverage: float
+    test_scale: float = 1.0     # foto usada = foto original * test_scale
+    object_scale: float = 1.0   # tamano del patron en la foto, respecto a su tamano en el patron
+    rotation_deg: float = 0.0
 
 
 # ---------------------------------------------------------------------------
@@ -98,43 +103,94 @@ def image_quality(image: np.ndarray) -> dict[str, float]:
 # Alineamiento
 # ---------------------------------------------------------------------------
 
+def _vote_pose(matches: list[Any], kp_t: Any, kp_g: Any) -> list[Any]:
+    """Votacion de Lowe: cada coincidencia propone una escala y un giro; se conservan las que coinciden con la
+    propuesta mas votada. Quita casi todas las falsas (fondo, texturas repetidas) antes de RANSAC."""
+    if len(matches) < 12:
+        return matches
+    log_scale = np.array([math.log(max(kp_t[m.queryIdx].size, 1e-3) / max(kp_g[m.trainIdx].size, 1e-3)) for m in matches])
+    angle = np.array([(kp_t[m.queryIdx].angle - kp_g[m.trainIdx].angle + 180.0) % 360.0 - 180.0 for m in matches])
+    scale_bin, angle_bin = 0.5, 30.0
+    # Cada coincidencia vota con su vecindad; el centro mas votado define el giro y la escala dominantes.
+    delta_s = np.abs(log_scale[:, None] - log_scale[None, :]) <= scale_bin
+    delta_a = np.abs((angle[:, None] - angle[None, :] + 180.0) % 360.0 - 180.0) <= angle_bin
+    votes = (delta_s & delta_a).sum(axis=1)
+    center = int(np.argmax(votes))
+    if votes[center] < 8:
+        return matches
+    keep = delta_s[center] & delta_a[center]
+    return [m for m, k in zip(matches, keep) if k]
+
+
 def _match_points(golden: np.ndarray, test: np.ndarray) -> tuple[np.ndarray | None, int, int]:
     """Homografia test -> golden por puntos SIFT. Devuelve (matriz, inliers, coincidencias)."""
+    # La foto puede ser mucho mas grande que el patron (el patron es un recorte): mas puntos en la foto.
+    big = test.shape[0] * test.shape[1] > 1.5 * golden.shape[0] * golden.shape[1]
     if hasattr(cv2, "SIFT_create"):
         detector, norm = cv2.SIFT_create(nfeatures=4000, contrastThreshold=0.02), cv2.NORM_L2
+        detector_test = cv2.SIFT_create(nfeatures=12000 if big else 4000, contrastThreshold=0.015 if big else 0.02)
     else:  # pragma: no cover
         detector, norm = cv2.ORB_create(nfeatures=4000), cv2.NORM_HAMMING
+        detector_test = cv2.ORB_create(nfeatures=12000 if big else 4000)
     clahe = cv2.createCLAHE(clipLimit=2.5, tileGridSize=(8, 8))
     kp_g, des_g = detector.detectAndCompute(clahe.apply(_gray(golden)), None)
-    kp_t, des_t = detector.detectAndCompute(clahe.apply(_gray(test)), None)
+    kp_t, des_t = detector_test.detectAndCompute(clahe.apply(_gray(test)), None)
     if des_g is None or des_t is None or len(kp_g) < 8 or len(kp_t) < 8:
         return None, 0, 0
     pairs = cv2.BFMatcher(norm).knnMatch(des_t, des_g, k=2)
     good = [m for m, n in (p for p in pairs if len(p) == 2) if m.distance < 0.75 * n.distance]
-    if len(good) < 8:
-        return None, 0, len(good)
-    src = np.float32([kp_t[m.queryIdx].pt for m in good])
-    dst = np.float32([kp_g[m.trainIdx].pt for m in good])
-    # Primero similitud (4 grados de libertad): es lo que mas se parece a "mover la pieza" y no deforma.
-    similarity, mask = cv2.estimateAffinePartial2D(src, dst, method=cv2.RANSAC, ransacReprojThreshold=4.0, maxIters=4000)
-    if similarity is None or mask is None:
-        return None, 0, len(good)
-    inliers = int(mask.sum())
-    matrix = np.vstack([similarity, [0.0, 0.0, 1.0]])
+    # SIFT da varios puntos en el mismo lugar (distinta orientacion): se conserva el mejor de cada lugar; si no,
+    # RANSAC puede "ajustar" un modelo degenerado que manda todo a un punto.
+    unique: dict[tuple[int, int, int, int], Any] = {}
+    for m in sorted(good, key=lambda item: item.distance):
+        key = (round(kp_t[m.queryIdx].pt[0] / 2), round(kp_t[m.queryIdx].pt[1] / 2),
+               round(kp_g[m.trainIdx].pt[0] / 2), round(kp_g[m.trainIdx].pt[1] / 2))
+        unique.setdefault(key, m)
+    everything = list(unique.values())
+    best: tuple[np.ndarray, int, int] | None = None
+    for subset in (everything, _vote_pose(everything, kp_t, kp_g)):
+        if len(subset) < 8:
+            continue
+        src = np.float32([kp_t[m.queryIdx].pt for m in subset])
+        dst = np.float32([kp_g[m.trainIdx].pt for m in subset])
+        # Primero similitud (4 grados de libertad): es lo que mas se parece a "mover la pieza" y no deforma.
+        similarity, mask = cv2.estimateAffinePartial2D(src, dst, method=cv2.RANSAC, ransacReprojThreshold=4.0, maxIters=4000)
+        if similarity is None or mask is None:
+            continue
+        scale = math.sqrt(abs(float(np.linalg.det(similarity[:, :2]))))
+        if not (0.05 <= scale <= 20.0):
+            continue  # modelo degenerado
+        count = int(mask.sum())
+        if best is None or count > best[1]:
+            best = (np.vstack([similarity, [0.0, 0.0, 1.0]]), count, len(subset))
+            best_points = (src, dst)
+    if best is None:
+        return None, 0, len(everything)
+    matrix, inliers, _ = best
+    src, dst = best_points
+    good = everything
     # Si hay muchas coincidencias se permite perspectiva (la camara no esta perfectamente perpendicular).
     if inliers >= 40:
         homography, hmask = cv2.findHomography(src, dst, cv2.RANSAC, 3.0)
         if homography is not None and hmask is not None and int(hmask.sum()) >= 0.9 * inliers:
-            corners = np.float32([[0, 0], [test.shape[1], 0], [test.shape[1], test.shape[0]], [0, test.shape[0]]])
-            warped = cv2.perspectiveTransform(corners[None], homography)[0]
-            area = abs(cv2.contourArea(warped))
-            if area > 0 and 0.2 < area / (golden.shape[0] * golden.shape[1]) < 5.0 and cv2.isContourConvex(warped.astype(np.float32)):
+            # La perspectiva solo se acepta si el patron cae casi donde dice la similitud (un objeto chico en una
+            # foto grande da homografias degeneradas que ajustan los puntos pero deforman todo lo demas).
+            corners = np.float32([[0, 0], [golden.shape[1], 0], [golden.shape[1], golden.shape[0]], [0, golden.shape[0]]])[None]
+            try:
+                by_similarity = cv2.perspectiveTransform(corners, np.linalg.inv(matrix))[0]
+                by_homography = cv2.perspectiveTransform(corners, np.linalg.inv(homography))[0]
+                size_in_test = max(golden.shape[:2]) / max(math.sqrt(abs(np.linalg.det(matrix[:2, :2]))), 1e-9)
+                close = np.isfinite(by_homography).all() and float(np.abs(by_similarity - by_homography).max()) <= 0.06 * size_in_test
+            except np.linalg.LinAlgError:
+                close = False
+            if close:
                 matrix, inliers = homography, int(hmask.sum())
     return matrix, inliers, len(good)
 
 
-def _refine_ecc(golden: np.ndarray, test: np.ndarray, matrix: np.ndarray) -> tuple[np.ndarray, float | None]:
-    """Afina la homografia minimizando la diferencia de gradientes (robusto a la luz)."""
+def _refine_ecc(golden: np.ndarray, warped: np.ndarray) -> tuple[np.ndarray | None, float | None]:
+    """Correccion fina (homografia) entre el patron y la foto YA llevada a su marco, minimizando la diferencia
+    de gradientes (robusto a la luz). Devuelve (correccion warped->patron, correlacion) o (None, None)."""
     def edges(image: np.ndarray) -> np.ndarray:
         blurred = cv2.GaussianBlur(_gray(image).astype(np.float32), (0, 0), 1.6)
         gx = cv2.Sobel(blurred, cv2.CV_32F, 1, 0)
@@ -143,52 +199,88 @@ def _refine_ecc(golden: np.ndarray, test: np.ndarray, matrix: np.ndarray) -> tup
 
     scale = min(1.0, 700.0 / max(golden.shape[:2]))
     small_g = edges(cv2.resize(golden, None, fx=scale, fy=scale, interpolation=cv2.INTER_AREA))
-    small_t = edges(cv2.resize(test, None, fx=scale, fy=scale, interpolation=cv2.INTER_AREA))
-    shrink = np.diag([scale, scale, 1.0])
-    start = (shrink @ matrix @ np.linalg.inv(shrink)).astype(np.float32)
-    # El warp de ECC va de la imagen de referencia (golden) a la otra (test): se pasa la inversa.
+    small_t = edges(cv2.resize(warped, None, fx=scale, fy=scale, interpolation=cv2.INTER_AREA))
+    identity = np.eye(3, dtype=np.float32)
     try:
-        inverse = np.linalg.inv(start).astype(np.float32)
         correlation, refined = cv2.findTransformECC(
-            small_g, small_t, inverse, cv2.MOTION_HOMOGRAPHY,
+            small_g, small_t, identity, cv2.MOTION_HOMOGRAPHY,
             (cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 60, 1e-5), None, 5,
         )
     except cv2.error:
-        return matrix, None
-    forward = np.linalg.inv(refined)
-    result = np.linalg.inv(shrink) @ forward @ shrink
-    # Se descarta el afinado si se mueve demasiado (fue a un minimo falso).
-    probe = np.float32([[0, 0], [test.shape[1], 0], [test.shape[1], test.shape[0]], [0, test.shape[0]]])[None]
-    moved = cv2.perspectiveTransform(probe, matrix)[0] - cv2.perspectiveTransform(probe, result)[0]
+        return None, None
+    shrink = np.diag([scale, scale, 1.0])
+    # `refined` lleva puntos del patron a la foto; la correccion warped -> patron es su inversa.
+    correction = np.linalg.inv(np.linalg.inv(shrink) @ refined @ shrink)
+    probe = np.float32([[0, 0], [golden.shape[1], 0], [golden.shape[1], golden.shape[0]], [0, golden.shape[0]]])[None]
+    moved = cv2.perspectiveTransform(probe, correction)[0] - probe[0]
     if float(np.abs(moved).max()) > 0.04 * max(golden.shape[:2]):
-        return matrix, None
-    return result / result[2, 2], float(correlation)
+        return None, None  # fue a un minimo falso
+    return correction / correction[2, 2], float(correlation)
 
 
-def align(golden: np.ndarray, test: np.ndarray) -> Alignment:
-    """Alinea `test` con `golden` (ambas ya a tamano de trabajo)."""
+def _similar_framing(golden: np.ndarray, test: np.ndarray) -> bool:
+    """El patron y la foto tienen tamano/proporcion parecidos (la foto es un recorte del mismo encuadre)."""
+    ratio_w = test.shape[1] / golden.shape[1]
+    ratio_h = test.shape[0] / golden.shape[0]
+    return 0.6 <= ratio_w <= 1.7 and 0.6 <= ratio_h <= 1.7 and abs(math.log(ratio_w / ratio_h)) < 0.25
+
+
+def align(golden: np.ndarray, test: np.ndarray) -> tuple[Alignment, np.ndarray]:
+    """Busca el patron dentro de `test` (cualquier posicion, giro o tamano) y los alinea.
+
+    Devuelve la alineacion y la foto realmente usada (se reduce si el objeto se ve mucho mas grande que en el
+    patron, para no perder nitidez al comprimirlo). `Alignment.matrix` lleva la foto usada al marco del patron.
+    """
     matrix, inliers, matches = _match_points(golden, test)
     method = "PUNTOS"
     if matrix is None or inliers < MIN_MATCHES:
-        # Pieza con poca textura: se intenta a ciegas, asumiendo mismo encuadre aproximado.
+        if not _similar_framing(golden, test):
+            raise CompareInconclusive(
+                "No se encontro la pieza patron en la foto: hay muy pocos puntos en comun. Verifique que sea la pieza "
+                "correcta, que se vea completa y enfocada y que la iluminacion sea parecida a la del patron."
+            )
+        # Pieza con poca textura y mismo encuadre: se intenta a ciegas, asumiendo el mismo encuadre aproximado.
         matrix = np.diag([golden.shape[1] / test.shape[1], golden.shape[0] / test.shape[0], 1.0])
         method = "ENCUADRE"
-    refined, ecc = _refine_ecc(golden, test, matrix)
-    if ecc is not None:
-        matrix = refined
+
+    # Tamano y giro del patron dentro de la foto.
+    linear = matrix[:2, :2] / matrix[2, 2]
+    object_scale = 1.0 / max(math.sqrt(abs(np.linalg.det(linear))), 1e-9)   # >1: el objeto se ve mas grande en la foto
+    if method == "PUNTOS" and not (0.15 <= object_scale <= 8.0 and np.isfinite(matrix).all()):
+        raise CompareInconclusive(
+            "No se encontro la pieza patron en la foto: lo que coincide tiene un tamano imposible. "
+            "Verifique que sea la pieza correcta y que se vea completa y enfocada."
+        )
+    rotation = math.degrees(math.atan2(-linear[1, 0], linear[0, 0]))
+    test_scale = 1.0
+    if object_scale > 1.35:
+        # Objeto mucho mas grande que en el patron: se reduce la foto para que quede del mismo tamano.
+        factor = 1.0 / object_scale
+        test = cv2.resize(test, None, fx=factor, fy=factor, interpolation=cv2.INTER_AREA)
+        matrix = matrix @ np.diag([1.0 / factor, 1.0 / factor, 1.0])
+        test_scale = factor
+
+    warped = cv2.warpPerspective(test, matrix, (golden.shape[1], golden.shape[0]), flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_REPLICATE)
+    correction, ecc = _refine_ecc(golden, warped)
+    if correction is not None:
+        matrix = correction @ matrix
         method += "+ECC"
     elif method == "ENCUADRE":
         raise CompareInconclusive(
             "No fue posible alinear la foto con la pieza patron: se encontraron muy pocos puntos en comun. "
             "Verifique que sea la pieza correcta, el enfoque y la iluminacion, y que el recorte la incluya."
         )
-    mask = _coverage_mask(golden, test, matrix)
-    coverage = float(mask.mean())
+    if ecc is not None and ecc < MIN_ECC:
+        raise CompareInconclusive(
+            "Lo que se encontro en la foto no coincide con la pieza patron (correlacion "
+            f"{ecc:.2f}). Verifique que sea la pieza correcta."
+        )
+    coverage = float(_coverage_mask(golden, test, matrix).mean())
     if method.startswith("ENCUADRE") and (ecc is None or ecc < 0.45):
         raise CompareInconclusive("La foto no coincide con la pieza patron (alineamiento poco confiable).")
     if method.startswith("PUNTOS") and ecc is None and inliers < 2 * MIN_MATCHES and coverage < 0.9:
         raise CompareInconclusive("Alineamiento poco confiable: pocas coincidencias con la pieza patron.")
-    return Alignment(matrix, method, inliers, matches, ecc, coverage)
+    return Alignment(matrix, method, inliers, matches, ecc, coverage, test_scale, object_scale, rotation), test
 
 
 def _coverage_mask(golden: np.ndarray, test: np.ndarray, matrix: np.ndarray) -> np.ndarray:
@@ -423,31 +515,36 @@ def compare(
     _check_input(golden_bgr, "patron")
     _check_input(test_bgr, "de la pieza")
 
-    quality = image_quality(test_bgr)
-    limits = {"sharpness": 12.0, "brightness_min": 28.0, "brightness_max": 232.0, "contrast": 6.0, "clipped": 0.35}
-    limits.update(min_quality or {})
-    if quality["brightness"] < limits["brightness_min"]:
-        raise CompareInconclusive(f"Foto muy oscura (brillo {quality['brightness']:.0f}). Revise la iluminacion.")
-    if quality["brightness"] > limits["brightness_max"]:
-        raise CompareInconclusive(f"Foto sobreexpuesta (brillo {quality['brightness']:.0f}). Reduzca la exposicion.")
-    if quality["sharpness"] < limits["sharpness"] or quality["contrast"] < limits["contrast"]:
-        raise CompareInconclusive(f"Foto desenfocada o sin contraste (nitidez {quality['sharpness']:.0f}). Revise el enfoque.")
-    if quality["clipped"] > limits["clipped"]:
-        raise CompareInconclusive(f"Demasiados pixeles saturados ({quality['clipped'] * 100:.0f} %). Reduzca reflejos o exposicion.")
+    if float(_gray(_fit(test_bgr, 512)[0]).mean()) < 10.0:
+        raise CompareInconclusive("La foto esta casi negra. Revise la iluminacion o la camara.")
 
     golden, g_scale = _fit(golden_bgr, WORK_SIDE)
-    # La foto se lleva a una resolucion de trabajo parecida a la del patron antes de alinear.
-    test, t_scale = _fit(test_bgr, int(max(golden.shape[:2]) * 1.6))
-    alignment = align(golden, test)
+    # El patron puede ser solo un recorte: la foto se conserva grande (hasta SEARCH_SIDE) para buscarlo en ella.
+    test, t_scale = _fit(test_bgr, SEARCH_SIDE)
+    alignment, test = align(golden, test)
+    alignment.test_scale *= t_scale
     if alignment.coverage < MIN_COVERAGE:
         raise CompareInconclusive(
-            f"La foto solo cubre el {alignment.coverage * 100:.0f} % de la pieza patron. "
-            "Recorte un area que incluya toda la zona del patron."
+            f"En la foto solo se ve el {alignment.coverage * 100:.0f} % de la pieza patron (el resto queda fuera del encuadre). "
+            "Encuadre la pieza completa."
         )
 
     height, width = golden.shape[:2]
     warped = cv2.warpPerspective(test, alignment.matrix, (width, height), flags=cv2.INTER_CUBIC, borderMode=cv2.BORDER_REPLICATE)
     covered = _coverage_mask(golden, test, alignment.matrix)
+
+    # Calidad de la imagen EN EL AREA DEL PATRON (no de toda la foto, que puede incluir mesa, fondo, etc.).
+    quality = image_quality(warped)
+    limits = {"sharpness": 12.0, "brightness_min": 28.0, "brightness_max": 232.0, "contrast": 6.0, "clipped": 0.35}
+    limits.update(min_quality or {})
+    if quality["brightness"] < limits["brightness_min"]:
+        raise CompareInconclusive(f"La pieza se ve muy oscura (brillo {quality['brightness']:.0f}). Revise la iluminacion.")
+    if quality["brightness"] > limits["brightness_max"]:
+        raise CompareInconclusive(f"La pieza se ve sobreexpuesta (brillo {quality['brightness']:.0f}). Reduzca la exposicion.")
+    if quality["sharpness"] < limits["sharpness"] or quality["contrast"] < limits["contrast"]:
+        raise CompareInconclusive(f"La pieza se ve desenfocada o sin contraste (nitidez {quality['sharpness']:.0f}). Revise el enfoque.")
+    if quality["clipped"] > limits["clipped"]:
+        raise CompareInconclusive(f"Demasiados pixeles saturados en la pieza ({quality['clipped'] * 100:.0f} %). Reduzca reflejos o exposicion.")
 
     golden_lab, test_lab = _lab(cv2.GaussianBlur(golden, (0, 0), 0.8)), _lab(cv2.GaussianBlur(warped, (0, 0), 0.8))
     # Solo es "no evaluable" donde AMBAS fotos estan quemadas (no hay nada que comparar). Si solo una lo esta,
@@ -549,6 +646,7 @@ def compare(
     ssim = _ssim(golden_gray, test_gray, valid)
     score = float(np.clip(100.0 - 22.0 * math.sqrt(total_pct) - 4.0 * len(regions) + 12.0 * (ssim - 0.9), 0, 100)) if regions else float(np.clip(80 + 20 * ssim, 0, 100))
 
+    located = _locate(test_bgr, golden, alignment)
     images = _render(golden, warped, mask, regions, color, edge_extra, edge_missing, valid, glare & covered, near_misses)
     report = {
         "status": status,
@@ -574,12 +672,16 @@ def compare(
             "method": alignment.method, "inliers": alignment.inliers, "matches": alignment.matches,
             "ecc": None if alignment.ecc is None else round(alignment.ecc, 3),
             "coverage_pct": round(100.0 * alignment.coverage, 1),
+            "object_scale": round(alignment.object_scale, 3),
+            "rotation_deg": round(alignment.rotation_deg, 1),
         },
         "quality": quality,
         "near_misses": near_misses,
         "sensitivity": sensitivity if sensitivity in PRESETS else DEFAULT_PRESET,
         "preset": preset,
     }
+    report["located"] = located["info"]
+    images["located"] = located["image"]
     return {"report": report, "images": images, "golden_work": golden, "test_aligned": warped}
 
 
@@ -608,6 +710,29 @@ def _near_misses(
         })
     found.sort(key=lambda item: -item["ratio"])
     return found[:8]
+
+
+def _locate(test_bgr: np.ndarray, golden: np.ndarray, alignment: Alignment) -> dict[str, Any]:
+    """Donde esta el patron dentro de la foto original: poligono (en pixeles de la foto) e imagen con el contorno."""
+    corners = np.float32([[0, 0], [golden.shape[1], 0], [golden.shape[1], golden.shape[0]], [0, golden.shape[0]]])[None]
+    polygon = cv2.perspectiveTransform(corners, np.linalg.inv(alignment.matrix))[0] / alignment.test_scale
+    height, width = test_bgr.shape[:2]
+    area = abs(float(cv2.contourArea(polygon.astype(np.float32))))
+    preview, factor = _fit(test_bgr, 1600)
+    drawn = preview.copy()
+    points = (polygon * factor).astype(np.int32)
+    overlay = drawn.copy()
+    cv2.fillPoly(overlay, [points], (80, 200, 80))
+    drawn = cv2.addWeighted(overlay, 0.18, drawn, 0.82, 0)
+    cv2.polylines(drawn, [points], True, (80, 220, 80), max(2, round(max(drawn.shape[:2]) / 500)), cv2.LINE_AA)
+    return {
+        "info": {
+            "polygon": [[round(float(x), 1), round(float(y), 1)] for x, y in polygon],
+            "photo_size": [width, height],
+            "area_fraction": round(area / max(width * height, 1), 4),
+        },
+        "image": drawn,
+    }
 
 
 def _ssim(a: np.ndarray, b: np.ndarray, valid: np.ndarray) -> float:

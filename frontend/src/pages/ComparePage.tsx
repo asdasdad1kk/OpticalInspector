@@ -40,7 +40,7 @@ import type { CameraStatus, CropRect } from "../types/api";
 
 type Mode = "inspect" | "register";
 type Source = "camera" | "photo";
-type View = "annotated" | "heatmap" | "golden" | "aligned";
+type View = "annotated" | "heatmap" | "golden" | "aligned" | "located";
 
 const LAST_PART_KEY = "optical-compare.part";
 const SENSITIVITY_KEY = "optical-compare.sensitivity";
@@ -67,6 +67,7 @@ const VIEW_LABEL: Record<View, string> = {
   heatmap: "Mapa de calor",
   golden: "Patrón",
   aligned: "Pieza alineada",
+  located: "Ubicación en la foto",
 };
 
 function readStored(key: string): string | undefined {
@@ -433,7 +434,7 @@ export default function ComparePage() {
                   : crop
                     ? `Área a analizar: ${crop.w} × ${crop.h} px.`
                     : photo
-                      ? "Recorte el área a analizar (si no recorta, se usa toda la foto)."
+                      ? mode === "inspect" ? "Recortar es opcional: sin recorte se busca el patrón en toda la foto (cualquier posición, giro o tamaño). Recortar acelera y evita fondos parecidos." : "Recorte el área que se va a comparar (si no recorta, se guarda toda la foto)."
                       : "Capture o seleccione una foto."}
             </p>
             {!showingReport && (

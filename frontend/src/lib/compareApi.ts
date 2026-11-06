@@ -57,7 +57,8 @@ export interface CompareReport {
     near_misses: number;
   };
   near_misses: { x: number; y: number; w: number; h: number; zone: string; area_px: number; delta_e_max: number; ratio: number }[];
-  alignment: { method: string; inliers: number; coverage_pct: number; ecc: number | null };
+  alignment: { method: string; inliers: number; coverage_pct: number; ecc: number | null; object_scale: number; rotation_deg: number };
+  located: { polygon: [number, number][]; photo_size: [number, number]; area_fraction: number };
   quality: { sharpness: number; brightness: number };
   sensitivity: Sensitivity;
   images: Record<string, string>;
