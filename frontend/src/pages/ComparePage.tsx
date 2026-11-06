@@ -7,6 +7,7 @@ import {
   CircleStop,
   Crop,
   GitCompareArrows,
+  ScanBarcode,
   History,
   ImageIcon,
   LoaderCircle,
@@ -36,6 +37,8 @@ import {
 import { useCameraStream } from "../hooks/useCameraStream";
 import CameraSelector, { loadCameraOptions } from "../components/CameraSelector";
 import ZoomableImage from "../components/ZoomableImage";
+import { ReadingResultsList, ReadingZonesEditor, ReadingZonesOverlay } from "../components/ReadingZones";
+import { getReadingCapabilities, zoneFromRect, type ReadingCapabilities, type ReadingZone } from "../lib/readingApi";
 import type { CameraStatus, CropRect } from "../types/api";
 
 type Mode = "inspect" | "register";
@@ -97,6 +100,11 @@ export default function ComparePage() {
   const [photoUrl, setPhotoUrl] = useState<string>();
   const [crop, setCrop] = useState<CropRect>();
   const [cropMode, setCropMode] = useState(false);
+  // Zonas de lectura del patron (codigos / texto), dibujadas sobre la foto.
+  const [zones, setZones] = useState<ReadingZone[]>([]);
+  const [zoneMode, setZoneMode] = useState(false);
+  const [readingZone, setReadingZone] = useState(false);
+  const [readingCaps, setReadingCaps] = useState<ReadingCapabilities>();
 
   const [parts, setParts] = useState<ComparePart[]>([]);
   const [partId, setPartId] = useState<number>();
@@ -135,6 +143,7 @@ export default function ComparePage() {
 
   useEffect(() => {
     getCameraStatus().then(setCamera).catch(() => undefined);
+    getReadingCapabilities().then(setReadingCaps).catch(() => undefined);
     refreshParts().catch((caught) => setError(message(caught, "No fue posible cargar las piezas.")));
     getCompareOptions()
       .then((options) => {
@@ -179,7 +188,21 @@ export default function ComparePage() {
     setView("annotated");
   }
 
+  async function addZone(rect: CropRect) {
+    if (!photo) return;
+    setZoneMode(false);
+    setReadingZone(true);
+    try {
+      const zone = await zoneFromRect(photo, rect, zones.length, Boolean(readingCaps?.text.available && readingCaps.text.enabled));
+      setZones((current) => [...current, zone]);
+    } finally {
+      setReadingZone(false);
+    }
+  }
+
   function discardPhoto() {
+    setZones([]);
+    setZoneMode(false);
     setPhoto(undefined);
     setCrop(undefined);
     setCropMode(false);
@@ -226,7 +249,7 @@ export default function ComparePage() {
     try {
       setSaving(true);
       setError(undefined);
-      const saved = await createPart({ photo, name: newName.trim(), description: description.trim(), crop });
+      const saved = await createPart({ photo, name: newName.trim(), description: description.trim(), crop, readings: zones });
       await refreshParts(saved.id);
       setNewName("");
       setDescription("");
@@ -405,8 +428,9 @@ export default function ComparePage() {
                 alt="Foto"
                 className="absolute inset-0"
                 selection={crop}
-                selectMode={cropMode}
-                onSelection={setCrop}
+                selectMode={cropMode || zoneMode}
+                onSelection={zoneMode ? addZone : setCrop}
+                overlay={zones.length ? <ReadingZonesOverlay zones={zones} /> : undefined}
               />
             ) : source === "camera" ? (
               stream.imageUrl && camera?.running ? (
@@ -431,6 +455,8 @@ export default function ComparePage() {
                 ? "Rueda o pellizco: zoom. Pulse una zona de la lista para resaltarla. Azul claro = no evaluable (reflejo saturado en ambas fotos)."
                 : cropMode
                   ? "Arrastre sobre la imagen para elegir el área a analizar (rueda: zoom). Pulse Listo al terminar."
+                  : zoneMode
+                    ? "Arrastre un rectángulo sobre el código, QR o texto que se debe leer (dentro del área recortada)."
                   : crop
                     ? `Área a analizar: ${crop.w} × ${crop.h} px.`
                     : photo
@@ -456,6 +482,21 @@ export default function ComparePage() {
                     {crop && !cropMode && (
                       <button type="button" className={buttonSecondary} onClick={() => setCrop(undefined)}>
                         Quitar recorte
+                      </button>
+                    )}
+                    {mode === "register" && readingCaps?.codes.enabled !== false && (
+                      <button
+                        type="button"
+                        className={`${buttonSecondary} ${zoneMode ? "border-sky-500/60 text-sky-400" : ""}`}
+                        title="Dibuje un rectángulo sobre un código, QR o texto que se deba leer y validar en cada inspección."
+                        onClick={() => {
+                          setCropMode(false);
+                          setZoneMode((value) => !value);
+                        }}
+                        disabled={readingZone}
+                      >
+                        {readingZone ? <LoaderCircle size={16} className="animate-spin" /> : <ScanBarcode size={16} />}
+                        {zoneMode ? "Dibuje la zona..." : "Zona de lectura"}
                       </button>
                     )}
                     <button type="button" className={buttonSecondary} onClick={discardPhoto}>
@@ -500,6 +541,7 @@ export default function ComparePage() {
                       Revisión {part.revision} · {part.width}×{part.height} px
                     </p>
                     <p>{part.inspections ?? 0} inspecciones</p>
+                    {part.readings?.length ? <p className="text-sky-400">{part.readings.length} zona(s) de lectura</p> : null}
                     {part.description && <p className="truncate">{part.description}</p>}
                     <button type="button" onClick={handleDeletePart} className="mt-1 inline-flex items-center gap-1 text-red-400 hover:text-red-300">
                       <Trash2 size={12} /> Eliminar revisión
@@ -560,7 +602,13 @@ export default function ComparePage() {
                   inspeccionar. La anterior se conserva.
                 </p>
               )}
-              <button type="button" className={`${buttonPrimary} w-full`} onClick={handleSavePart} disabled={!canSave}>
+              {zones.length > 0 && (
+                <div className="space-y-2">
+                  <p className="text-sm font-medium text-zinc-300">Zonas de lectura</p>
+                  <ReadingZonesEditor zones={zones} onChange={setZones} textAvailable={Boolean(readingCaps?.text.available)} />
+                </div>
+              )}
+              <button type="button" className={`${buttonPrimary} w-full`} onClick={handleSavePart} disabled={!canSave || zoneMode || readingZone}>
                 {saving ? <LoaderCircle size={16} className="animate-spin" /> : <BookmarkPlus size={16} />}
                 Guardar como patrón
               </button>
@@ -595,6 +643,12 @@ export default function ComparePage() {
               <p className="text-xs text-zinc-500">
                 Umbral dE {report.metrics.threshold_delta_e} · mayor diferencia de color encontrada {report.metrics.peak_delta_e}
               </p>
+              {report.readings && report.readings.length > 0 && (
+                <ReadingResultsList
+                  results={report.readings}
+                  imageUrl={(id) => (report.images[`reading-${id}`] ? compareImageUrl(report.images[`reading-${id}`]) : undefined)}
+                />
+              )}
               {report.near_misses.length > 0 && (
                 <div className="rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-2 text-xs text-zinc-400">
                   <p className="font-semibold text-zinc-300">

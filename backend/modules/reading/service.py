@@ -56,7 +56,7 @@ def capabilities(refresh: bool = False) -> dict[str, Any]:
     }
 
 
-def normalize_zone(raw: dict[str, Any], index: int) -> dict[str, Any]:
+def normalize_zone(raw: dict[str, Any], index: int, min_size: float = 8.0) -> dict[str, Any]:
     """Valida y limpia una zona que llega del frontend."""
     kind = str(raw.get("kind", "code"))
     rule = str(raw.get("rule", "record"))
@@ -68,8 +68,8 @@ def normalize_zone(raw: dict[str, Any], index: int) -> dict[str, Any]:
         x, y, w, h = (float(raw[key]) for key in ("x", "y", "w", "h"))
     except (KeyError, TypeError, ValueError) as error:
         raise ValueError("La zona de lectura necesita x, y, w, h numericos.") from error
-    if w < 8 or h < 8:
-        raise ValueError("La zona de lectura es demasiado chica (minimo 8 x 8 px).")
+    if w <= 0 or h <= 0 or w < min_size or h < min_size:
+        raise ValueError(f"La zona de lectura es demasiado chica (minimo {min_size:g} x {min_size:g}).")
     pattern = str(raw.get("pattern") or "")
     if rule == "regex":
         try:
@@ -86,14 +86,14 @@ def normalize_zone(raw: dict[str, Any], index: int) -> dict[str, Any]:
     }
 
 
-def normalize_zones(raw: Any) -> list[dict[str, Any]]:
+def normalize_zones(raw: Any, min_size: float = 8.0) -> list[dict[str, Any]]:
     if not raw:
         return []
     if not isinstance(raw, list):
         raise ValueError("Las zonas de lectura deben ser una lista.")
     if len(raw) > 30:
         raise ValueError("Maximo 30 zonas de lectura.")
-    return [normalize_zone(item, index) for index, item in enumerate(raw)]
+    return [normalize_zone(item, index, min_size) for index, item in enumerate(raw)]
 
 
 def _crop(image: np.ndarray, zone: dict[str, Any], scale: float, margin: float) -> np.ndarray | None:

@@ -1,5 +1,6 @@
 import { API_URL } from "./api";
 import type { CropRect } from "../types/api";
+import type { ReadingResult, ReadingZone } from "./readingApi";
 
 export type CompareVerdict = "OK" | "REVISAR" | "FALLO";
 export type Sensitivity = "maximo" | "estricto" | "normal" | "tolerante";
@@ -16,6 +17,7 @@ export interface ComparePart {
   revisions?: number;
   inspections?: number;
   last_status?: CompareVerdict | null;
+  readings?: ReadingZone[];
 }
 
 export interface CompareRegion {
@@ -46,6 +48,7 @@ export interface CompareReport {
   score: number;
   summary: string;
   regions: CompareRegion[];
+  readings?: ReadingResult[];
   metrics: {
     anomalous_area_pct: number;
     regions: number;
@@ -112,12 +115,19 @@ export async function listParts(): Promise<ComparePart[]> {
   return json(await fetch(`${API_URL}/compare/parts`, { cache: "no-store" }));
 }
 
-export async function createPart(data: { photo: File; name: string; description: string; crop?: CropRect }): Promise<ComparePart> {
+export async function createPart(data: {
+  photo: File;
+  name: string;
+  description: string;
+  crop?: CropRect;
+  readings?: ReadingZone[];
+}): Promise<ComparePart> {
   const form = new FormData();
   form.append("photo", data.photo);
   form.append("name", data.name);
   form.append("description", data.description);
   if (data.crop) form.append("crop", JSON.stringify(data.crop));
+  if (data.readings?.length) form.append("readings", JSON.stringify(data.readings));
   return json(await fetch(`${API_URL}/compare/parts`, { method: "POST", body: form }));
 }
 

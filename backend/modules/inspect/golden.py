@@ -941,4 +941,35 @@ def run_extra_checks(
         extras.append(check_label(rectified, canvas, golden, options))
     if enabled.get("distances"):
         extras.append(check_distances(items, results, canvas, options))
+    if enabled.get("reading", True) and golden.get("readings"):
+        extras.extend(check_readings(rectified, canvas, golden))
     return extras
+
+
+def check_readings(rectified: np.ndarray, canvas: dict[str, Any], golden: dict[str, Any]) -> list[dict[str, Any]]:
+    """Zonas de lectura (codigos / texto) sobre la imagen rectificada.
+
+    Las zonas se guardan en unidades de la referencia (como los features: y hacia arriba negativa); aqui se
+    pasan a pixeles del lienzo. Un resultado por zona, con su valor leido y el esperado.
+    """
+    from modules.reading import service as reading  # noqa: PLC0415 - opcional
+
+    scale = canvas["scale"]
+    xmin_c, _, _, ymax_c = canvas["bounds"]
+    zones = []
+    for zone in golden["readings"]:
+        zones.append({**zone, "x": (zone["x"] - xmin_c) * scale, "y": (ymax_c - zone["y"]) * scale,
+                      "w": zone["w"] * scale, "h": zone["h"] * scale})
+    out: list[dict[str, Any]] = []
+    for zone, read in zip(zones, reading.read_zones(rectified, zones)):
+        status = "OK" if read["status"] == "OMITIDO" else read["status"]
+        x1, y1 = int(zone["x"]), int(zone["y"])
+        out.append({
+            "id": f"LECTURA {read['name']}", "type": "LECTURA", "kind": "reading",
+            "status": status, "score": {"OK": 100.0, "REVISAR": 50.0, "FALLO": 0.0}[status],
+            "reasons": [] if read["status"] == "OK" else [read["reason"]],
+            "value": read["value"], "expected": read["expected"], "rule": read["rule"], "format": read["format"],
+            "confidence": read["confidence"], "reading_status": read["status"], "name": read["name"],
+            "box": [x1, y1, int(zone["x"] + zone["w"]), int(zone["y"] + zone["h"])],
+        })
+    return out

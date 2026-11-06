@@ -14,6 +14,7 @@ from core.db import get_session
 from models import Drawing, Part
 from modules.camera import scans
 from modules.inspect.pipeline import LARGE_HOLE_FRACTION, MIN_ANCHORS
+from modules.reading import service as reading_service
 from modules.inspect.golden import DEFAULT_ENABLED, analyze_reference, draw_reference_preview, rescale_analysis
 from modules.reference import relief as relief_lib
 from modules.inspect.calibration import calibration_service
@@ -201,6 +202,11 @@ async def save(
 
     active = [f for f in features if f.get("enabled", True)]
     enabled = {**DEFAULT_ENABLED, **(payload.get("enabled") or {})}
+    try:
+        # Zonas de lectura (codigos / texto) en unidades de la referencia, como los features.
+        readings = reading_service.normalize_zones(payload.get("readings") or [], min_size=0.0)
+    except ValueError as error:
+        raise HTTPException(status_code=422, detail=str(error)) from error
     if enabled["features"] and len(active) < MIN_ANCHORS:
         raise HTTPException(status_code=422, detail="Se necesitan al menos 4 features activos.")
 
@@ -314,6 +320,7 @@ async def save(
                     "scale": scale,
                     "relative": bool(payload.get("relative", False)),
                     "enabled": enabled,
+                    "readings": readings,
                     "photo_path": photo_path,
                     "crop": list(rect) if rect else None,
                     "image_size": [int(image.shape[1]), int(image.shape[0])],

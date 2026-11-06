@@ -868,6 +868,12 @@ def draw_results(canvas_image: np.ndarray, results: list[dict[str, Any]]) -> np.
             cv2.putText(output, f"ETIQUETA {item['status']}", (x1, max(15, y1 - 6)),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2, cv2.LINE_AA)
             continue
+        if kind == "reading":
+            x1, y1, x2, y2 = item["box"]
+            cv2.rectangle(output, (x1, y1), (x2, y2), color, 2, cv2.LINE_AA)
+            text = f"{item.get('name', 'LECTURA')}: {item.get('value') or '?'}"[:40]
+            cv2.putText(output, text, (x1, max(15, y1 - 6)), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2, cv2.LINE_AA)
+            continue
         if kind == "distances":
             continue
         cx, cy = item["center_x_px"], item["center_y_px"]

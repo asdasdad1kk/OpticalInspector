@@ -104,6 +104,44 @@ def test_zone_rules() -> None:
     print("reglas de zona (igual, regex, presente, registrar, escala, validacion): OK")
 
 
+def test_panel_reading() -> None:
+    """Modo de paneles: zona de lectura en la pieza patron, leida tras rectificar la foto movida."""
+    from modules.inspect.golden import analyze_reference  # noqa: PLC0415
+    from modules.inspect.pipeline import run_pipeline  # noqa: PLC0415
+
+    def with_qr(text: str) -> np.ndarray:
+        image = cv2.imread(str(BACKEND / "tests" / "panel1.png"))
+        qr = make_code("QRCode", text, 110)
+        image[280:280 + qr.shape[0], 560:560 + qr.shape[1]] = qr  # sobre la placa, entre insertos
+        return image
+
+    good = with_qr("PANEL-0001")
+    reference = analyze_reference(good)
+    scale = reference["scale"]
+    qr_size = make_code("QRCode", "PANEL-0001", 110).shape[0]
+    zone = {"name": "QR panel", "kind": "code", "rule": "equals", "expected": "PANEL-0001",
+            # unidades de la referencia: x = px * escala, y = -px * escala (borde superior)
+            "x": 545 * scale, "y": -265 * scale, "w": (qr_size + 30) * scale, "h": (qr_size + 30) * scale}
+    golden = {k: reference[k] for k in ("contour", "label", "dimensions", "enabled")}
+    golden["readings"] = service.normalize_zones([zone], min_size=0.0)
+    items = [{k: f[k] for k in ("id", "type", "x", "y", "radius", "material", "radius_reliable")} for f in reference["features"]]
+    b = reference["bounds"]
+
+    def inspect(image: np.ndarray) -> dict:
+        h, w = image.shape[:2]
+        matrix = cv2.getRotationMatrix2D((w / 2, h / 2), 4, 0.95)
+        matrix[0, 2] += 15
+        moved = cv2.warpAffine(image, matrix, (w, h), borderMode=cv2.BORDER_REPLICATE)
+        run = run_pipeline(moved, items, (b["xmin"], b["xmax"], b["ymin"], b["ymax"]), {"check_edges": False}, None, golden)
+        return next(r for r in run["results"] if r.get("kind") == "reading")
+
+    ok = inspect(good)
+    assert ok["status"] == "OK" and ok["value"] == "PANEL-0001", ok
+    wrong = inspect(with_qr("PANEL-0002"))
+    assert wrong["status"] == "FALLO" and wrong["value"] == "PANEL-0002", wrong
+    print("modo de paneles: zona de lectura tras rectificar (correcta y distinta): OK")
+
+
 def test_text() -> None:
     if not ocr.locate()["available"]:
         print("OCR: Tesseract no esta instalado; pruebas de texto OMITIDAS")
@@ -119,5 +157,6 @@ def test_text() -> None:
 if __name__ == "__main__":
     test_codes()
     test_zone_rules()
+    test_panel_reading()
     test_text()
     print("TODO OK")
