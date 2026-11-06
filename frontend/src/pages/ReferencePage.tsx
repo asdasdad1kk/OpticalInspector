@@ -11,6 +11,7 @@ import {
   MousePointerClick,
   Play,
   Scan,
+  ScanBarcode,
   ScanSearch,
   Trash2,
   UploadCloud,
@@ -29,6 +30,8 @@ import {
 import { useCameraStream } from "../hooks/useCameraStream";
 import CameraSelector, { loadCameraOptions } from "../components/CameraSelector";
 import ZoomableImage, { type ImageMarker } from "../components/ZoomableImage";
+import { ReadingZonesEditor, ReadingZonesOverlay } from "../components/ReadingZones";
+import { getReadingCapabilities, zoneFromRect, type ReadingCapabilities, type ReadingZone } from "../lib/readingApi";
 
 // three.js pesa bastante: solo se descarga al abrir la vista 3D.
 const PartViewer3D = lazy(() => import("../components/PartViewer3D"));
@@ -76,6 +79,11 @@ export default function ReferencePage() {
   const [analysis, setAnalysis] = useState<ReferenceAnalysis>();
   const [analyzing, setAnalyzing] = useState(false);
   const [addMode, setAddMode] = useState(false);
+  // Zonas de lectura (codigos / texto) en pixeles de la imagen mostrada; se guardan en unidades de la referencia.
+  const [zones, setZones] = useState<ReadingZone[]>([]);
+  const [zoneMode, setZoneMode] = useState(false);
+  const [readingZone, setReadingZone] = useState(false);
+  const [readingCaps, setReadingCaps] = useState<ReadingCapabilities>();
   const [view, setView] = useState<"2d" | "3d">("2d");
   const [scanId, setScanId] = useState<string>();
   const [scanInfo, setScanInfo] = useState<ScanInfo>();
@@ -96,6 +104,7 @@ export default function ReferencePage() {
 
   useEffect(() => {
     getCameraStatus().then(setCamera).catch(() => undefined);
+    getReadingCapabilities().then(setReadingCaps).catch(() => undefined);
   }, []);
 
   useEffect(() => {
@@ -124,7 +133,25 @@ export default function ReferencePage() {
     }
   }
 
+  async function addZone(rect: CropRect) {
+    if (!photo) return;
+    setZoneMode(false);
+    setReadingZone(true);
+    try {
+      // Se lee sobre la misma imagen que se ve (la corregida por calibracion, si la hay).
+      const source = correctedUrl
+        ? new File([await (await fetch(correctedUrl)).blob()], "corregida.jpg", { type: "image/jpeg" })
+        : photo;
+      const zone = await zoneFromRect(source, rect, zones.length, Boolean(readingCaps?.text.available && readingCaps.text.enabled));
+      setZones((current) => [...current, zone]);
+    } finally {
+      setReadingZone(false);
+    }
+  }
+
   function resetAnalysis() {
+    setZones([]);
+    setZoneMode(false);
     setView("2d");
     setAnalysis(undefined);
     setCorrectedUrl(undefined);
@@ -265,7 +292,9 @@ export default function ReferencePage() {
       void _image;
       void _relief;
       void _scan;
-      setSaved(await saveReference({ photo, partNo, revision, description, reference, scanId, crop }));
+      const s = analysis.scale || 1;
+      const readings = zones.map((zone) => ({ ...zone, x: zone.x * s, y: -zone.y * s, w: zone.w * s, h: zone.h * s }));
+      setSaved(await saveReference({ photo, partNo, revision, description, reference: { ...reference, readings }, scanId, crop }));
     } catch (caught) {
       setError(message(caught, "No fue posible guardar la pieza patrón."));
     } finally {
@@ -467,8 +496,8 @@ export default function ReferencePage() {
               <ZoomableImage
                 onLoad={setImageDims}
                 selection={analysis ? undefined : crop}
-                selectMode={cropMode}
-                onSelection={setCrop}
+                selectMode={cropMode || zoneMode}
+                onSelection={zoneMode ? addZone : setCrop}
                 src={correctedUrl ?? photoUrl}
                 alt="Pieza patrón"
                 className="absolute inset-0"
@@ -479,6 +508,7 @@ export default function ReferencePage() {
                 overlay={
                   analysis && (
                     <>
+                      <ReadingZonesOverlay zones={zones} />
                       {analysis.enabled.contour && (
                         <polygon
                           points={analysis.contour.map(([x, y]) => `${x / scale},${-y / scale}`).join(" ")}
@@ -617,6 +647,21 @@ export default function ReferencePage() {
                   <MousePointerClick size={16} /> {addMode ? "Terminar" : "Agregar feature"}
                 </button>
               )}
+              {analysis && view === "2d" && readingCaps?.codes.enabled !== false && (
+                <button
+                  type="button"
+                  className={`${buttonSecondary} ${zoneMode ? "border-sky-500/60 text-sky-400" : ""}`}
+                  title="Dibuje un rectángulo sobre un código, QR o texto que se deba leer y validar en cada inspección."
+                  onClick={() => {
+                    setAddMode(false);
+                    setZoneMode((value) => !value);
+                  }}
+                  disabled={readingZone}
+                >
+                  {readingZone ? <LoaderCircle size={16} className="animate-spin" /> : <ScanBarcode size={16} />}
+                  {zoneMode ? "Dibuje la zona..." : "Zona de lectura"}
+                </button>
+              )}
             </div>
           </div>
         </section>
@@ -672,6 +717,14 @@ export default function ReferencePage() {
               </button>
             </div>
           </section>
+
+          {analysis && zones.length > 0 && (
+            <section className="space-y-3 rounded-2xl border border-zinc-800 bg-zinc-900/60 p-5">
+              <h2 className="font-semibold">Zonas de lectura</h2>
+              <ReadingZonesEditor zones={zones} onChange={setZones} textAvailable={Boolean(readingCaps?.text.available)} />
+              <p className="text-xs text-zinc-500">Se leen y validan en cada inspección de esta pieza (códigos y QR; texto con OCR si está instalado).</p>
+            </section>
+          )}
 
           {analysis && (
             <>

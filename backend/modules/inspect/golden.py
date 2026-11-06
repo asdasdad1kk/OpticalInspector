@@ -967,7 +967,8 @@ def check_readings(rectified: np.ndarray, canvas: dict[str, Any], golden: dict[s
         out.append({
             "id": f"LECTURA {read['name']}", "type": "LECTURA", "kind": "reading",
             "status": status, "score": {"OK": 100.0, "REVISAR": 50.0, "FALLO": 0.0}[status],
-            "reasons": [] if read["status"] == "OK" else [read["reason"]],
+            # En OK se muestra lo leido (el panel de resultados lista el primer motivo de cada item).
+            "reasons": ([f"Leido «{read['value']}»"] if read["value"] else []) if read["status"] == "OK" else [read["reason"]],
             "value": read["value"], "expected": read["expected"], "rule": read["rule"], "format": read["format"],
             "confidence": read["confidence"], "reading_status": read["status"], "name": read["name"],
             "box": [x1, y1, int(zone["x"] + zone["w"]), int(zone["y"] + zone["h"])],

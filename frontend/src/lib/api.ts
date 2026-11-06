@@ -210,7 +210,7 @@ export async function saveReference(data: {
   partNo: string;
   revision: string;
   description: string;
-  reference: Omit<ReferenceAnalysis, "preview_png">;
+  reference: Omit<ReferenceAnalysis, "preview_png"> & { readings?: unknown[] };
   scanId?: string;
   crop?: CropRect;
 }): Promise<UploadResponse> {

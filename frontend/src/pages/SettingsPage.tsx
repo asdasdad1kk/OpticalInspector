@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
+import { getReadingCapabilities, testReading, type ReadingCapabilities } from "../lib/readingApi";
 import {
   Camera,
   CheckCircle2,
@@ -17,6 +18,7 @@ import {
   Trash2,
   Upload,
   XCircle,
+  ScanBarcode,
 } from "lucide-react";
 
 import {
@@ -30,6 +32,7 @@ import {
   type CalibrationInfo,
   type ConfigSettings,
   type PartRow,
+  type ReadingSettings,
   type StorageStatus,
   type ValidationEntry,
   type ValidationRun,
@@ -759,15 +762,149 @@ function StorageTab({ settings, guard, reload, onLogout }: { settings: ConfigSet
 }
 
 // ============================================================
+// PESTAÑA: LECTURA (CODIGOS / OCR)
+// ============================================================
+
+const READING_DEFAULTS: ReadingSettings = {
+  codes_enabled: true, text_enabled: true, languages: "spa+eng", psm: 7, min_text_confidence: 60, timeout_s: 8,
+  code_formats: "comunes", unreadable_status: "REVISAR", mismatch_status: "FALLO",
+};
+
+function ReadingTab({ settings, guard, reload }: { settings: ConfigSettings; guard: Guard; reload: () => void }) {
+  const [values, setValues] = useState<ReadingSettings>({ ...READING_DEFAULTS, ...(settings.reading ?? {}) });
+  const [caps, setCaps] = useState<ReadingCapabilities>();
+  const [probe, setProbe] = useState<string>();
+  const [probing, setProbing] = useState(false);
+  useEffect(() => setValues({ ...READING_DEFAULTS, ...(settings.reading ?? {}) }), [settings]);
+  const refresh = useCallback(async (force = false) => {
+    await guard(async () => setCaps(await getReadingCapabilities(force)));
+  }, [guard]);
+  useEffect(() => { refresh(); }, [refresh]);
+
+  async function test(event: React.ChangeEvent<HTMLInputElement>) {
+    const file = event.target.files?.[0];
+    event.target.value = "";
+    if (!file) return;
+    setProbing(true);
+    setProbe(undefined);
+    try {
+      const result = await testReading(file, undefined, values.text_enabled && Boolean(caps?.text.available));
+      const lines = result.codes.map((code) => `${code.format}: ${code.text}`);
+      if (result.text?.text) lines.push(`Texto (${Math.round(result.text.confidence)}%): ${result.text.text}`);
+      if (result.text?.error) lines.push(`OCR: ${result.text.error}`);
+      setProbe(lines.length ? lines.join("\n") : "No se encontró ningún código ni texto en la foto.");
+    } catch (caught) {
+      setProbe(caught instanceof Error ? caught.message : "No fue posible leer la foto.");
+    } finally {
+      setProbing(false);
+    }
+  }
+
+  const select = "rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-2 text-sm";
+  return (
+    <div className="grid gap-6 xl:grid-cols-2">
+      <section className={card}>
+        <h2 className="flex items-center gap-2 font-semibold"><ScanBarcode size={17} /> Motores instalados</h2>
+        <dl className="mt-3 space-y-2 text-sm">
+          <div className="flex justify-between gap-3">
+            <dt className="text-zinc-400">Códigos de barras / QR</dt>
+            <dd className={caps?.codes.engine === "zxing-cpp" ? "text-emerald-400" : "text-amber-400"}>
+              {caps ? `${caps.codes.engine}${caps.codes.version ? ` ${caps.codes.version}` : ""}` : "…"}
+            </dd>
+          </div>
+          {caps?.codes.note && <p className="text-xs text-amber-300">{caps.codes.note}</p>}
+          <div className="flex justify-between gap-3">
+            <dt className="text-zinc-400">Texto (Tesseract OCR)</dt>
+            <dd className={caps?.text.available ? "text-emerald-400" : "text-zinc-500"}>
+              {caps ? (caps.text.available ? caps.text.version ?? "instalado" : "no instalado") : "…"}
+            </dd>
+          </div>
+          {caps?.text.available && (
+            <p className="break-all text-xs text-zinc-500">
+              {caps.text.path} · idiomas: {caps.text.languages.filter((l) => l !== "osd").join(", ") || "—"}
+            </p>
+          )}
+          {caps && !caps.text.available && <p className="text-xs text-zinc-500">{caps.text.note}</p>}
+        </dl>
+        <div className="mt-4 flex flex-wrap gap-2">
+          <button type="button" className={secondary} onClick={() => refresh(true)}>Volver a buscar</button>
+          <label className={`${secondary} cursor-pointer`}>
+            {probing ? "Leyendo…" : "Probar con una foto"}
+            <input type="file" accept="image/*" className="hidden" onChange={test} disabled={probing} />
+          </label>
+        </div>
+        {probe && <pre className="mt-3 whitespace-pre-wrap rounded-lg bg-zinc-950 p-3 text-xs text-zinc-300">{probe}</pre>}
+        <p className="mt-3 text-xs text-zinc-600">
+          El OCR solo se ejecuta cuando una pieza tiene zonas de texto: si no se usa, no consume tiempo. Las zonas se dibujan al
+          dar de alta la pieza (Pieza real) o al guardar un patrón (Comparador).
+        </p>
+      </section>
+
+      <section className={card}>
+        <h2 className="font-semibold">Ajustes de lectura</h2>
+        <div className="mt-3 space-y-3">
+          <Toggle label="Leer códigos de barras / QR" checked={values.codes_enabled} onChange={(v) => setValues({ ...values, codes_enabled: v })} />
+          <Toggle label="Leer texto (OCR)" checked={values.text_enabled} onChange={(v) => setValues({ ...values, text_enabled: v })} />
+          <div className="grid gap-4 sm:grid-cols-2">
+            <label className="block text-xs font-medium text-zinc-300">Tipos de código
+              <select className={`${select} mt-1 w-full`} value={values.code_formats} onChange={(e) => setValues({ ...values, code_formats: e.target.value })}>
+                <option value="comunes">Comunes (QR, DataMatrix, Code128/39/93, EAN/UPC, ITF, PDF417…)</option>
+                <option value="2d">Solo 2D (QR, DataMatrix, Aztec, PDF417)</option>
+                <option value="lineales">Solo lineales (Code128/39/93, EAN/UPC, ITF…)</option>
+                <option value="todos">Todos los que soporta el lector</option>
+              </select>
+            </label>
+            <label className="block text-xs font-medium text-zinc-300">Idiomas del OCR
+              <select className={`${select} mt-1 w-full`} value={values.languages} onChange={(e) => setValues({ ...values, languages: e.target.value })}>
+                <option value="spa+eng">Español + inglés</option>
+                <option value="spa">Español</option>
+                <option value="eng">Inglés</option>
+              </select>
+            </label>
+            <label className="block text-xs font-medium text-zinc-300">Modo de página (PSM)
+              <select className={`${select} mt-1 w-full`} value={values.psm} onChange={(e) => setValues({ ...values, psm: Number(e.target.value) })}>
+                <option value={7}>7 · una línea (recomendado)</option>
+                <option value={6}>6 · bloque de texto</option>
+                <option value={8}>8 · una palabra</option>
+                <option value={11}>11 · texto disperso</option>
+                <option value={13}>13 · línea cruda</option>
+              </select>
+            </label>
+            <NumberField label="Confianza mínima del OCR (%)" step={5} value={values.min_text_confidence} onChange={(v) => v !== undefined && setValues({ ...values, min_text_confidence: v })} />
+            <NumberField label="Tiempo máximo por zona (s)" step={1} value={values.timeout_s} onChange={(v) => v !== undefined && setValues({ ...values, timeout_s: v })} />
+            <label className="block text-xs font-medium text-zinc-300">Si no se puede leer
+              <select className={`${select} mt-1 w-full`} value={values.unreadable_status} onChange={(e) => setValues({ ...values, unreadable_status: e.target.value })}>
+                <option value="REVISAR">REVISAR</option>
+                <option value="FALLO">FALLO</option>
+              </select>
+            </label>
+            <label className="block text-xs font-medium text-zinc-300">Si se lee otro valor
+              <select className={`${select} mt-1 w-full`} value={values.mismatch_status} onChange={(e) => setValues({ ...values, mismatch_status: e.target.value })}>
+                <option value="FALLO">FALLO</option>
+                <option value="REVISAR">REVISAR</option>
+              </select>
+            </label>
+          </div>
+          <button type="button" className={primary} onClick={() => guard(async () => { await cfgSend("/settings/reading", "PUT", values); reload(); }, "Ajustes de lectura guardados.")}>
+            <CheckCircle2 size={16} /> Guardar
+          </button>
+        </div>
+      </section>
+    </div>
+  );
+}
+
+// ============================================================
 // PAGINA
 // ============================================================
 
-type Tab = "inspection" | "camera" | "parts" | "storage";
+type Tab = "inspection" | "camera" | "parts" | "reading" | "storage";
 
 const TABS: { id: Tab; label: string; icon: typeof Camera }[] = [
   { id: "inspection", label: "Inspección", icon: SlidersHorizontal },
   { id: "camera", label: "Cámara y calibración", icon: Camera },
   { id: "parts", label: "Piezas y validación", icon: FlaskConical },
+  { id: "reading", label: "Lectura (códigos / OCR)", icon: ScanBarcode },
   { id: "storage", label: "Almacenamiento y seguridad", icon: Database },
 ];
 
@@ -895,6 +1032,8 @@ export default function SettingsPage() {
         <CameraTab settings={settings} guard={guard} reload={loadSettings} />
       ) : tab === "parts" ? (
         <PartsTab settings={settings} guard={guard} reloadSettings={loadSettings} />
+      ) : tab === "reading" ? (
+        <ReadingTab settings={settings} guard={guard} reload={loadSettings} />
       ) : (
         <StorageTab settings={settings} guard={guard} reload={loadSettings} onLogout={logout} />
       )}

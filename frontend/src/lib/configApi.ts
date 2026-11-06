@@ -80,12 +80,25 @@ export async function login(password: string): Promise<{ token: string; default_
   return result;
 }
 
+export interface ReadingSettings {
+  codes_enabled: boolean;
+  text_enabled: boolean;
+  languages: string;
+  psm: number;
+  min_text_confidence: number;
+  timeout_s: number;
+  code_formats: string;
+  unreadable_status: string;
+  mismatch_status: string;
+}
+
 export interface ConfigSettings {
   inspection: Record<string, number | boolean>;
   camera: { lock_enabled: boolean; exposure: number; wb_temperature: number; autofocus: boolean; focus: number };
   calibration: { apply: boolean; square_mm: number };
   dxf: { default_unit: string };
   backup: { enabled: boolean; keep: number; interval_hours: number };
+  reading?: ReadingSettings;
   parts: Record<string, Record<string, number | boolean>>;
   dxf_units: string[];
 }
