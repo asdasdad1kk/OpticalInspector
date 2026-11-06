@@ -41,6 +41,9 @@ SCANS_DIR = _path("OI_SCANS_DIR", DATA_DIR / "storage" / "scans")
 SCANS3D_DIR = _path("OI_SCANS3D_DIR", DATA_DIR / "storage" / "scans3d")
 VALIDATION_DIR = _path("OI_VALIDATION_DIR", DATA_DIR / "storage" / "validation")
 CALIBRATION_DIR = _path("OI_CALIBRATION_DIR", DATA_DIR / "storage" / "calibration")
+# Comparador optico general: base de datos y archivos propios, separados de los de paneles.
+COMPARE_DB_PATH = _path("OI_COMPARE_DB_PATH", DATA_DIR / "optical_compare.db")
+COMPARE_DIR = _path("OI_COMPARE_DIR", DATA_DIR / "storage" / "compare")
 BACKUP_DIR = _path("OI_BACKUP_DIR", DATA_DIR / "backups")
 LOG_DIR = _path("OI_LOG_DIR", DATA_DIR / "logs")
 SETTINGS_FILE = _path("OI_SETTINGS_FILE", DATA_DIR / "settings.json")
@@ -60,6 +63,8 @@ PATHS = {
     "OI_SCANS3D_DIR": SCANS3D_DIR,
     "OI_VALIDATION_DIR": VALIDATION_DIR,
     "OI_CALIBRATION_DIR": CALIBRATION_DIR,
+    "OI_COMPARE_DB_PATH": COMPARE_DB_PATH,
+    "OI_COMPARE_DIR": COMPARE_DIR,
     "OI_BACKUP_DIR": BACKUP_DIR,
     "OI_LOG_DIR": LOG_DIR,
     "OI_SETTINGS_FILE": SETTINGS_FILE,
@@ -69,6 +74,6 @@ PATHS = {
 def ensure_dirs() -> None:
     for directory in (
         DATA_DIR, DB_PATH.parent, IMAGES_DIR, GOLDEN_DIR, SCANS_DIR, SCANS3D_DIR, VALIDATION_DIR,
-        CALIBRATION_DIR, BACKUP_DIR, LOG_DIR, SETTINGS_FILE.parent,
+        CALIBRATION_DIR, COMPARE_DB_PATH.parent, COMPARE_DIR, BACKUP_DIR, LOG_DIR, SETTINGS_FILE.parent,
     ):
         directory.mkdir(parents=True, exist_ok=True)

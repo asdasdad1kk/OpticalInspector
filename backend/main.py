@@ -36,6 +36,12 @@ try:  # el escaner 3D es independiente: si falla al cargar, el resto de la app a
     from modules.scanner3d.router import router as scanner_router
 except Exception as _scanner_error:  # pragma: no cover
     scanner_router = None
+try:  # el comparador general es independiente de los paneles: si falla al cargar, el resto arranca igual
+    from modules.compare import store as compare_store
+    from modules.compare.router import router as compare_router
+except Exception as _compare_error:  # pragma: no cover
+    compare_router = None
+    compare_store = None
 import os
 import sys
 
@@ -108,6 +114,11 @@ closing = False
 async def lifespan(app: FastAPI):
     setup_logging()
     create_database()
+    if compare_store is not None:
+        try:
+            compare_store.init()
+        except Exception:  # pragma: no cover
+            pass
     start_backup_scheduler()
 
     yield
@@ -184,6 +195,12 @@ app.include_router(
 if scanner_router is not None:
     app.include_router(
         scanner_router,
+        prefix="/api",
+    )
+
+if compare_router is not None:
+    app.include_router(
+        compare_router,
         prefix="/api",
     )
 

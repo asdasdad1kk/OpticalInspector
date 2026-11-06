@@ -1,0 +1,124 @@
+"""Comparador optico general: alta de patron, inspeccion, explicacion de discrepancias y BD separada.
+
+Uso (desde backend/):  python tests/test_compare.py
+
+Usa una BD y una carpeta temporales (no toca los datos reales) y fotos de tests/ como piezas de ejemplo
+(el comparador no sabe que son paneles: es una comparacion visual cualquiera).
+"""
+from __future__ import annotations
+
+import json
+import os
+import sqlite3
+import sys
+import tempfile
+from pathlib import Path
+
+import cv2
+import numpy as np
+
+BACKEND = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(BACKEND))
+
+TMP = Path(tempfile.mkdtemp(prefix="compare_test_"))
+os.environ["OI_COMPARE_DB_PATH"] = str(TMP / "compare.db")
+os.environ["OI_COMPARE_DIR"] = str(TMP / "files")
+os.environ["OI_DB_PATH"] = str(TMP / "main.db")
+os.environ["OI_DATA_DIR"] = str(TMP)
+
+from fastapi import FastAPI  # noqa: E402
+from fastapi.testclient import TestClient  # noqa: E402
+
+from modules.compare.router import router  # noqa: E402
+
+app = FastAPI()
+app.include_router(router, prefix="/api")
+client = TestClient(app)
+
+BRIO = sorted((BACKEND / "tests" / "panel_curvo_completo").glob("*.jpg"))[0]
+PIECE = (170, 330, 1670, 230)  # x, y, w, h del recorte de la pieza dentro de la foto
+
+
+def jpeg(image: np.ndarray) -> bytes:
+    return cv2.imencode(".jpg", image, [cv2.IMWRITE_JPEG_QUALITY, 95])[1].tobytes()
+
+
+def crop_form(rect=PIECE) -> str:
+    return json.dumps({"x": rect[0], "y": rect[1], "w": rect[2], "h": rect[3]})
+
+
+def test_flow() -> None:
+    photo = cv2.imread(str(BRIO))
+    # 1) Dar de alta el patron: foto completa + recorte.
+    created = client.post("/api/compare/parts", data={"name": "Tira A", "crop": crop_form()}, files={"photo": ("a.jpg", jpeg(photo), "image/jpeg")})
+    assert created.status_code == 200, created.text
+    part = created.json()
+    assert part["name"] == "Tira A" and part["revision"] == 1 and part["width"] == 1670
+    assert [p["name"] for p in client.get("/api/compare/parts").json()] == ["Tira A"]
+
+    # 2) La misma pieza, movida y con otro recorte: debe salir OK sin que el usuario alinee nada.
+    h, w = photo.shape[:2]
+    matrix = cv2.getRotationMatrix2D((w / 2, h / 2), 3, 0.92)
+    matrix[0, 2] += 25
+    matrix[1, 2] += 15
+    moved = cv2.warpAffine(photo, matrix, (w, h), borderMode=cv2.BORDER_REPLICATE)
+    answer = client.post("/api/compare/inspect", data={"part_name": "tira a", "crop": crop_form((120, 280, 1760, 340))}, files={"photo": ("b.jpg", jpeg(moved), "image/jpeg")})
+    assert answer.status_code == 200, answer.text
+    assert answer.json()["status"] == "OK", answer.json()["summary"]
+
+    # 3) Defectos sembrados: cada uno debe dar una zona con explicacion.
+    defective = photo.copy()
+    cv2.circle(defective, (170 + 700, 330 + 100), 22, (30, 30, 30), -1)               # mancha oscura al centro
+    cv2.rectangle(defective, (170 + 1500, 330 + 60), (170 + 1590, 330 + 150), (40, 60, 200), -1)  # parche rojo
+    cv2.line(defective, (170 + 300, 330 + 40), (170 + 420, 330 + 170), (20, 20, 20), 3)           # rayon
+    answer = client.post("/api/compare/inspect", data={"part_id": part["id"], "crop": crop_form()}, files={"photo": ("c.jpg", jpeg(defective), "image/jpeg")})
+    assert answer.status_code == 200, answer.text
+    report = answer.json()
+    assert report["status"] == "FALLO", report["summary"]
+    assert len(report["regions"]) >= 3, [r["explanation"] for r in report["regions"]]
+    kinds = {r["kind"] for r in report["regions"]}
+    assert "color" in kinds, kinds
+    for region in report["regions"]:
+        assert region["explanation"] and region["probable_cause"] and region["zone"]
+        assert client.get(f"/api{report['images'][f'region-{region['id']}']}").status_code == 200
+    for kind in ("annotated", "heatmap", "test", "golden", "aligned"):
+        assert client.get(f"/api{report['images'][kind]}").status_code == 200, kind
+    assert client.get(f"/api/compare/inspections/{report['id']}").json()["status"] == "FALLO"
+    assert len(client.get("/api/compare/inspections", params={"part": "Tira A"}).json()) == 2
+
+    # 4) Mismo nombre = nueva revision; la anterior se conserva.
+    again = client.post("/api/compare/parts", data={"name": "TIRA A", "crop": crop_form()}, files={"photo": ("a.jpg", jpeg(photo), "image/jpeg")})
+    assert again.json()["revision"] == 2
+    assert len(client.get("/api/compare/parts").json()) == 1
+    print("flujo alta / inspeccion / explicacion: OK")
+
+
+def test_errors() -> None:
+    photo = cv2.imread(str(BRIO))
+    assert client.post("/api/compare/parts", data={"name": "  "}, files={"photo": ("a.jpg", jpeg(photo), "image/jpeg")}).status_code == 400
+    assert client.post("/api/compare/inspect", data={"part_name": "no existe"}, files={"photo": ("a.jpg", jpeg(photo), "image/jpeg")}).status_code == 404
+    assert client.post("/api/compare/parts", data={"name": "X"}, files={"photo": ("a.jpg", b"basura", "image/jpeg")}).status_code == 400
+    assert client.post("/api/compare/parts", data={"name": "X", "crop": crop_form((0, 0, 20, 20))}, files={"photo": ("a.jpg", jpeg(photo), "image/jpeg")}).status_code == 400
+    # Una pieza totalmente distinta no es alineable: NO CONCLUYENTE (422), no un veredicto inventado.
+    other = cv2.imread(str(BACKEND / "tests" / "panel1.png"))
+    answer = client.post("/api/compare/inspect", data={"part_name": "Tira A"}, files={"photo": ("o.jpg", jpeg(other), "image/jpeg")})
+    assert answer.status_code == 422 and "NO CONCLUYENTE" in answer.json()["detail"], answer.text
+    dark = np.full((400, 600, 3), 10, np.uint8)
+    answer = client.post("/api/compare/inspect", data={"part_name": "Tira A"}, files={"photo": ("d.jpg", jpeg(dark), "image/jpeg")})
+    assert answer.status_code == 422, answer.text
+    print("errores y NO CONCLUYENTE: OK")
+
+
+def test_separate_database() -> None:
+    """Los datos del comparador viven en su archivo; el de paneles no se toca ni se crea."""
+    tables = {r[0] for r in sqlite3.connect(TMP / "compare.db").execute("SELECT name FROM sqlite_master WHERE type='table'")}
+    assert {"part", "inspection"} <= tables, tables
+    assert not (TMP / "main.db").exists(), "el comparador no debe crear ni usar la BD de paneles"
+    print("BD separada de paneles: OK")
+
+
+if __name__ == "__main__":
+    test_flow()
+    test_errors()
+    test_separate_database()
+    print("TODO OK")
