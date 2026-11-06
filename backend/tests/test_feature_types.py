@@ -113,11 +113,11 @@ def test_brio_cones() -> None:
 
 
 def test_gray_on_gray_panel() -> None:
-    """Placa gris sobre mesa gris (foto de la base de datos): 18 features y el contorno cubre toda la placa."""
+    """Placa gris sobre mesa gris (foto de la base de datos): 18 features (el casquillo dorado es conico) y el contorno cubre toda la placa."""
     image = cv2.imread(str(TESTS / "optical_inspector.db-x-inspection-1-original_image.jpg"))
     result = analyze_reference(image)
     counts = dict(collections.Counter(f["type"] for f in result["features"]))
-    assert counts == {I: 11, C: 6, P: 1}, counts
+    assert counts == {I: 11, C: 7}, counts
     contour = np.array([[x, -y] for x, y in result["contour"]], np.float32)
     for x, y in ((84, 114), (90, 283), (97, 463), (866, 441), (845, 136)):  # incluida la esquina superior izquierda
         assert cv2.pointPolygonTest(contour, (float(x), float(y)), False) >= 0, (x, y)

@@ -549,12 +549,12 @@ def _classify_feature_type_once(
         return None
     if center > 0.85 * disk or center > CENTER_DARK_MAX * plate:
         # El centro de un hueco es claramente mas oscuro que la placa. Excepcion: casquillo de laton
-        # con centro metalico claro (color latonado dentro, placa sin color alrededor) = delron plano.
+        # con centro metalico claro (color latonado dentro, placa sin color alrededor) = delron conico.
         if band(saturation, 0.0, 0.8) >= BRASS_CORE_SAT_MIN and band(saturation, 2.0, 3.0) <= BRASS_PLATE_SAT_MAX:
             return {
-                "observed_type": "DELRON_PLANO", "hole_radius_px": round(hole, 2), "cone_score": 0.0,
+                "observed_type": "DELRON_CONICO", "hole_radius_px": round(hole, 2), "cone_score": 0.0,
                 "disk_ratio": 1.0, "ring_ratio": 0.0, "interior_ratio": 1.0, "ramp": 0.0,
-                "rim_radius_px": None, "bore_radius_px": round(0.3 * hole, 2),
+                "rim_radius_px": round(hole, 2), "bore_radius_px": round(0.3 * hole, 2),
             }
         return None
 
