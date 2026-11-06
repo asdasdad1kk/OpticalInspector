@@ -155,6 +155,12 @@ hiddenimports = [
     "modules.reference.router",
     "modules.reference.samples",
     "modules.upload.router",
+    "modules.compare.router",
+    "modules.reading.router",
+
+    # Lectura de codigos (zxing-cpp) y puente a Tesseract (el ejecutable va aparte, ver instalador)
+    "zxingcpp",
+    "pytesseract",
 
     # Vision
     "cv2",
@@ -195,6 +201,8 @@ PACKAGES = (
     "pyrealsense2",
     "pystray",
     "PIL",
+    "zxingcpp",      # incluye su extension nativa (.pyd)
+    "pytesseract",
 )
 
 for package in PACKAGES:

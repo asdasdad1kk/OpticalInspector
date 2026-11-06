@@ -6,17 +6,19 @@
   1. Compila el frontend (npm run build).
   2. Empaqueta el backend con PyInstaller (carpeta, sin extraccion a %TEMP%).
   3. Prueba el ejecutable (arranca, sirve la web y la API, crea su base de datos).
-  4. Compila installer\OpticalInspector.iss con Inno Setup.
+  4. Prepara Tesseract OCR (componente opcional, marcado por defecto; requiere 7-Zip).
+  5. Compila installer\OpticalInspector.iss con Inno Setup.
 
   Resultado: installer\Output\OpticalInspector_Setup_<version>.exe
 
   Requisitos SOLO en la PC que genera el instalador: Python 3.11+ (64 bits),
-  Node.js y Inno Setup 6. La PC del usuario final no necesita nada.
+  Node.js, Inno Setup 6 y 7-Zip (para el OCR). La PC del usuario final no necesita nada.
 
 .EXAMPLE
   .\build_installer.ps1
   .\build_installer.ps1 -Version 1.2.0
   .\build_installer.ps1 -SkipFrontend -SkipPip     # reconstruccion rapida
+  .\build_installer.ps1 -SkipOcr                    # sin el componente de lectura de texto (OCR)
 #>
 [CmdletBinding()]
 param(
@@ -24,6 +26,7 @@ param(
     [switch]$SkipFrontend,
     [switch]$SkipPip,
     [switch]$SkipSmokeTest,
+    [switch]$SkipOcr,
     [switch]$Clean
 )
 
@@ -130,6 +133,18 @@ $python = $venvPython
 if (-not $SkipPip) {
     Invoke-Checked $python @('-m', 'pip', 'install', '--disable-pip-version-check', '-q', '--upgrade', 'pip') $Backend
     Invoke-Checked $python @('-m', 'pip', 'install', '--disable-pip-version-check', '-q', '-r', 'requirements.txt') $Backend
+    Invoke-Checked $python @('-m', 'pip', 'install', '--disable-pip-version-check', '-q', 'pefile') $Backend
+}
+
+# ------------------------------------------------------------ OCR (opcional)
+$TesseractDir = Join-Path $Installer 'vendor\tesseract_bundle'
+if ($SkipOcr) {
+    Write-Host 'OCR omitido (-SkipOcr): el instalador solo leera codigos de barras / QR.' -ForegroundColor Yellow
+    $TesseractDir = $null
+} else {
+    Step 'Preparando Tesseract OCR (descarga fijada y verificada; solo lo necesario)'
+    Invoke-Checked $python @((Join-Path $Installer 'prepare_tesseract.py'), '--out', $TesseractDir) $Root
+    if (-not (Test-Path (Join-Path $TesseractDir 'tesseract.exe'))) { throw 'No se preparo Tesseract.' }
 }
 Invoke-Checked $python @((Join-Path $Installer 'make_icon.py')) $Root
 
@@ -149,8 +164,10 @@ if (-not $SkipSmokeTest) {
     New-Item -ItemType Directory -Force -Path $sandbox | Out-Null
 
     # Perfil de usuario aislado: no toca tus datos reales.
-    $saved = @{ LOCALAPPDATA = $env:LOCALAPPDATA; OI_PORT = $env:OI_PORT; OI_NO_BROWSER = $env:OI_NO_BROWSER }
+    $saved = @{ LOCALAPPDATA = $env:LOCALAPPDATA; OI_PORT = $env:OI_PORT; OI_NO_BROWSER = $env:OI_NO_BROWSER; OI_TESSERACT_PATH = $env:OI_TESSERACT_PATH }
     $env:LOCALAPPDATA = $sandbox; $env:OI_PORT = "$port"; $env:OI_NO_BROWSER = '1'
+    # El OCR se instala junto al exe ({app}\tesseract); en la prueba se apunta a la carpeta preparada.
+    $env:OI_TESSERACT_PATH = if ($TesseractDir) { $TesseractDir } else { 'off' }
     $process = $null
     try {
         $process = Start-Process -FilePath $ExePath -PassThru
@@ -172,6 +189,14 @@ if (-not $SkipSmokeTest) {
                  -ContentType 'application/json' -Body '{"password":"admin"}' -TimeoutSec 10
         if (-not $login.token) { throw 'El panel de configuracion no responde.' }
 
+        $reading = Invoke-RestMethod "http://127.0.0.1:$port/api/reading/capabilities" -TimeoutSec 30
+        if ($reading.codes.engine -ne 'zxing-cpp') { throw "El lector de codigos empaquetado es '$($reading.codes.engine)', no zxing-cpp." }
+        if ($TesseractDir) {
+            if (-not $reading.text.available) { throw "Tesseract no funciona desde el ejecutable: $($reading.text.note)" }
+            if (-not (($reading.text.languages -contains 'spa') -and ($reading.text.languages -contains 'eng'))) { throw 'Faltan los idiomas spa/eng del OCR.' }
+            Write-Host "OK: OCR $($reading.text.version) con idiomas $($reading.text.languages -join ', ')." -ForegroundColor Green
+        }
+
         $db = Get-ChildItem $sandbox -Recurse -Filter 'optical_inspector.db' -ErrorAction SilentlyContinue
         if (-not $db) { throw 'No se creo la base de datos.' }
         Write-Host 'OK: arranca, sirve la web, la API y crea su base de datos.' -ForegroundColor Green
@@ -181,6 +206,7 @@ if (-not $SkipSmokeTest) {
         foreach ($name in $saved.Keys) { Set-Item -Path "Env:$name" -Value $saved[$name] -ErrorAction SilentlyContinue }
         if ($null -eq $saved.OI_PORT) { Remove-Item Env:OI_PORT -ErrorAction SilentlyContinue }
         if ($null -eq $saved.OI_NO_BROWSER) { Remove-Item Env:OI_NO_BROWSER -ErrorAction SilentlyContinue }
+        if ($null -eq $saved.OI_TESSERACT_PATH) { Remove-Item Env:OI_TESSERACT_PATH -ErrorAction SilentlyContinue }
         Start-Sleep -Milliseconds 800
         Remove-Item $sandbox -Recurse -Force -ErrorAction SilentlyContinue
     }
@@ -188,7 +214,9 @@ if (-not $SkipSmokeTest) {
 
 # ------------------------------------------------------------ instalador
 Step 'Compilando el instalador con Inno Setup'
-Invoke-Checked $iscc @("/DMyAppVersion=$Version", "/DSourceDir=$AppDir", '/Q', 'OpticalInspector.iss') $Installer
+$isccArgs = @("/DMyAppVersion=$Version", "/DSourceDir=$AppDir", '/Q')
+if ($TesseractDir) { $isccArgs += "/DTesseractDir=$TesseractDir" }
+Invoke-Checked $iscc ($isccArgs + @('OpticalInspector.iss')) $Installer
 
 $setup = Join-Path $Installer "Output\OpticalInspector_Setup_$Version.exe"
 if (-not (Test-Path $setup)) { throw 'Inno Setup no genero el instalador.' }

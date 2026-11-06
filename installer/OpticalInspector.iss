@@ -48,14 +48,33 @@ RestartApplications=no
 [Languages]
 Name: "spanish"; MessagesFile: "compiler:Languages\Spanish.isl"
 
+[Types]
+Name: "full"; Description: "Completa (incluye lectura de texto OCR)"
+Name: "compact"; Description: "Sin lectura de texto (OCR)"
+Name: "custom"; Description: "Personalizada"; Flags: iscustom
+
+[Components]
+Name: "main"; Description: "Optical Inspector (incluye lectura de codigos de barras y QR)"; Types: full compact custom; Flags: fixed
+#ifdef TesseractDir
+Name: "ocr"; Description: "Lectura de texto (OCR): Tesseract 5.4, ingles y espanol, modelos de alta precision"; Types: full
+#endif
+
 [Tasks]
 Name: "desktopicon"; Description: "Crear un acceso directo en el &Escritorio"; GroupDescription: "Accesos directos:"; Flags: unchecked
 Name: "autostart"; Description: "Iniciar {#MyAppName} al iniciar sesion en Windows"; GroupDescription: "Inicio:"; Flags: unchecked
 
 [Files]
-Source: "{#SourceDir}\*"; DestDir: "{app}"; Flags: recursesubdirs createallsubdirs ignoreversion
+Source: "{#SourceDir}\*"; DestDir: "{app}"; Components: main; Flags: recursesubdirs createallsubdirs ignoreversion
+#ifdef TesseractDir
+; OCR opcional (marcado por defecto). La app lo busca en {app}\tesseract; sin el, solo se leen codigos.
+Source: "{#TesseractDir}\*"; DestDir: "{app}\tesseract"; Components: ocr; Flags: recursesubdirs createallsubdirs ignoreversion
+#endif
 ; Plantilla documentada de configuracion, junto al .env del usuario.
-Source: "..\backend\.env.example"; DestDir: "{localappdata}\OpticalInspector"; Flags: ignoreversion
+Source: "..\backend\.env copy.example"; DestDir: "{localappdata}\OpticalInspector"; DestName: ".env.example"; Flags: ignoreversion
+
+[InstallDelete]
+; Al actualizar se quita el OCR anterior: si se vuelve a elegir, se copia de nuevo; si no, queda desinstalado.
+Type: filesandordirs; Name: "{app}\tesseract"
 
 [Icons]
 Name: "{autoprograms}\{#MyAppName}"; Filename: "{app}\{#MyAppExe}"

@@ -19,6 +19,14 @@
 # OI_LOG_DIR=
 # OI_SETTINGS_FILE=
 
+# Comparador optico general: base de datos y archivos propios (separados de los de paneles)
+# OI_COMPARE_DB_PATH=
+# OI_COMPARE_DIR=
+
+# Lectura de texto (OCR): ruta a tesseract.exe o a su carpeta. Si no se indica, se usa el
+# componente OCR del instalador (carpeta tesseract junto al programa) o el que este en el PATH. "off" lo desactiva.
+# OI_TESSERACT_PATH=
+
 # Servidor. Use 0.0.0.0 para consultar la app desde otra PC de la red.
 # OI_HOST=127.0.0.1
 # OI_PORT=8000
