@@ -27,7 +27,7 @@ Si la foto no permite decidir (no se alinea, está borrosa, muy oscura, demasiad
 
 ## Cómo compara (`modules/compare/engine.py`)
 
-1. **Búsqueda y alineación**: la foto se conserva grande (`SEARCH_SIDE`, 3200 px) para buscar el patrón; puntos SIFT con votación de giro/escala + RANSAC (similitud; homografía si hay muchos puntos) y afinado ECC sobre bordes.
+1. **Búsqueda y alineación** (si los puntos SIFT no bastan o no se parecen al patrón, p. ej. piezas lisas con fondo rugoso, se busca por plantilla en toda la foto con cualquier giro y tamaño; siempre se verifica el parecido): la foto se conserva grande (`SEARCH_SIDE`, 3200 px) para buscar el patrón; puntos SIFT con votación de giro/escala + RANSAC (similitud; homografía si hay muchos puntos) y afinado ECC sobre bordes.
    Cobertura mínima del patrón: `MIN_COVERAGE` (0.80).
 2. **Luz**: se iguala el color global y se corrige un campo suave de brillo (celdas grandes con mediana, así un
    defecto chico no se «normaliza»).
@@ -52,6 +52,7 @@ Si la foto no permite decidir (no se alinea, está borrosa, muy oscura, demasiad
 | Brillos quemados | `SATURATED_L` (247), `MAX_EXCLUDED` | qué se considera reflejo y cuánto puede haber |
 | Calidad mínima de la foto | `limits` en `compare()` | nitidez, brillo, contraste, % saturado (también por `min_quality`) |
 | Búsqueda del patrón en la foto | `SEARCH_SIDE`, `MIN_MATCHES` (14), `MIN_ECC` (0.30) | más puntos mínimos / más correlación = más estricto para aceptar que «ahí está la pieza»; si no la encuentra en fotos reales, baje `MIN_MATCHES` (ej. 10) |
+| Verificación de lo encontrado | `MIN_VERIFY` (0.35), `MIN_VERIFY_TEMPLATE` (0.55) | parecido mínimo entre el patrón y la zona encontrada; evita aceptar coincidencias falsas sobre un fondo rugoso. Si rechaza piezas correctas con otra luz, bájelos un poco |
 | Tamaño de trabajo | `WORK_SIDE` (1400 px) | más alto = detecta cosas más finas, más lento |
 | Textos de causas y tipos | `_explain`, `KIND_LABEL` | para afinar el lenguaje o agregar tipos |
 

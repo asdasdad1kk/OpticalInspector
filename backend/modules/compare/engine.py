@@ -65,6 +65,7 @@ class Alignment:
     test_scale: float = 1.0     # foto usada = foto original * test_scale
     object_scale: float = 1.0   # tamano del patron en la foto, respecto a su tamano en el patron
     rotation_deg: float = 0.0
+    verify: float = 0.0         # parecido (ZNCC) entre el patron y la foto alineada
 
 
 # ---------------------------------------------------------------------------
@@ -225,32 +226,148 @@ def _similar_framing(golden: np.ndarray, test: np.ndarray) -> bool:
     return 0.6 <= ratio_w <= 1.7 and 0.6 <= ratio_h <= 1.7 and abs(math.log(ratio_w / ratio_h)) < 0.25
 
 
-def align(golden: np.ndarray, test: np.ndarray) -> tuple[Alignment, np.ndarray]:
-    """Busca el patron dentro de `test` (cualquier posicion, giro o tamano) y los alinea.
+MIN_VERIFY = 0.35               # correlacion minima (gris o bordes) entre el patron y la foto ya alineada (puntos)
+MIN_VERIFY_TEMPLATE = 0.55      # idem para la busqueda por plantilla, que siempre encuentra *algo* y por eso exige mas
 
-    Devuelve la alineacion y la foto realmente usada (se reduce si el objeto se ve mucho mas grande que en el
-    patron, para no perder nitidez al comprimirlo). `Alignment.matrix` lleva la foto usada al marco del patron.
+
+def _verify(golden: np.ndarray, warped: np.ndarray, covered: np.ndarray) -> float:
+    """Que tanto se parece lo encontrado al patron (ZNCC de gris y de bordes, 0-1). Una coincidencia falsa
+    (p. ej. puntos casuales sobre un fondo rugoso) da ~0; la pieza correcta, con otra luz, da > 0.5."""
+    factor = min(1.0, 320.0 / max(golden.shape[:2]))
+
+    def prep(image: np.ndarray) -> np.ndarray:
+        gray = cv2.GaussianBlur(_gray(image), (0, 0), 1.5)
+        return cv2.resize(gray, None, fx=factor, fy=factor, interpolation=cv2.INTER_AREA).astype(np.float32)
+
+    def edges(gray: np.ndarray) -> np.ndarray:
+        return cv2.magnitude(cv2.Sobel(gray, cv2.CV_32F, 1, 0), cv2.Sobel(gray, cv2.CV_32F, 0, 1))
+
+    a, b = prep(golden), prep(warped)
+    mask = cv2.resize(covered.astype(np.uint8), (a.shape[1], a.shape[0]), interpolation=cv2.INTER_NEAREST) > 0
+
+    def zncc(x: np.ndarray, y: np.ndarray) -> float:
+        x, y = x[mask], y[mask]
+        if x.size < 50:
+            return 0.0
+        x, y = x - x.mean(), y - y.mean()
+        norm = math.sqrt(float((x * x).sum() * (y * y).sum()))
+        return float((x * y).sum() / norm) if norm > 1e-6 else 0.0
+
+    return max(zncc(a, b), zncc(edges(a), edges(b)))
+
+
+class _Rejected(CompareInconclusive):
+    """Un candidato de alineamiento no paso la verificacion (se prueba con el siguiente)."""
+
+
+def _template_candidates(golden: np.ndarray, test: np.ndarray, keep: int = 5) -> list[np.ndarray]:
+    """Busca el patron por plantilla (ZNCC) en toda la foto, con cualquier giro y tamano.
+
+    Respaldo para piezas lisas, con pocos puntos propios, que los puntos SIFT no encuentran (o encuentran en el
+    fondo). Va de grueso (foto ~320 px) a fino; devuelve matrices foto -> patron, mejores primero.
     """
-    matrix, inliers, matches = _match_points(golden, test)
-    method = "PUNTOS"
-    if matrix is None or inliers < MIN_MATCHES:
-        if not _similar_framing(golden, test):
-            raise CompareInconclusive(
-                "No se encontro la pieza patron en la foto: hay muy pocos puntos en comun. Verifique que sea la pieza "
-                "correcta, que se vea completa y enfocada y que la iluminacion sea parecida a la del patron."
-            )
-        # Pieza con poca textura y mismo encuadre: se intenta a ciegas, asumiendo el mismo encuadre aproximado.
-        matrix = np.diag([golden.shape[1] / test.shape[1], golden.shape[0] / test.shape[0], 1.0])
-        method = "ENCUADRE"
+    gold_gray = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(4, 4)).apply(_gray(golden))
+    test_gray = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8)).apply(_gray(test))
+    gh, gw = gold_gray.shape
 
-    # Tamano y giro del patron dentro de la foto.
+    def build(factor: float, angle: float) -> tuple[np.ndarray, np.ndarray, np.ndarray] | None:
+        """Plantilla del patron a `factor` y girada `angle`: (imagen, mascara, matriz patron -> plantilla)."""
+        size = int(math.ceil(math.hypot(gw, gh) * factor)) + 4
+        if size < 14:
+            return None
+        center = np.array([size / 2.0, size / 2.0])
+        scale_m = np.diag([factor, factor, 1.0])
+        shift = np.eye(3)
+        shift[:2, 2] = center - np.array([gw * factor / 2.0, gh * factor / 2.0])
+        rot = np.vstack([cv2.getRotationMatrix2D((float(center[0]), float(center[1])), angle, 1.0), [0, 0, 1]])
+        matrix = rot @ shift @ scale_m
+        image = cv2.warpAffine(gold_gray, matrix[:2], (size, size), flags=cv2.INTER_AREA if factor < 1 else cv2.INTER_LINEAR)
+        mask = cv2.warpAffine(np.full((gh, gw), 255, np.uint8), matrix[:2], (size, size), flags=cv2.INTER_NEAREST)
+        mask = cv2.erode(mask, np.ones((3, 3), np.uint8))
+        return image, mask, matrix
+
+    def match(image: np.ndarray, templ: np.ndarray, mask: np.ndarray) -> tuple[float, tuple[int, int]]:
+        if templ.shape[0] >= image.shape[0] or templ.shape[1] >= image.shape[1]:
+            return -1.0, (0, 0)
+        try:
+            result = cv2.matchTemplate(image, templ, cv2.TM_CCOEFF_NORMED, mask=mask)
+        except cv2.error:
+            result = cv2.matchTemplate(image, templ, cv2.TM_CCOEFF_NORMED)
+        result = np.nan_to_num(result, nan=-1.0, posinf=-1.0, neginf=-1.0)
+        _, best, _, location = cv2.minMaxLoc(result)
+        return float(best), (int(location[0]), int(location[1]))
+
+    # --- grueso ---
+    coarse = min(1.0, 320.0 / max(test_gray.shape))
+    small = cv2.resize(test_gray, None, fx=coarse, fy=coarse, interpolation=cv2.INTER_AREA)
+    found: list[tuple[float, float, float, tuple[int, int]]] = []
+    for relative in (0.5, 0.6, 0.71, 0.84, 1.0, 1.19, 1.41, 1.68, 2.0):
+        for angle in range(0, 360, 12):
+            built = build(coarse * relative, float(angle))
+            if built is None:
+                continue
+            score, location = match(small, built[0], built[1])
+            if score > 0:
+                found.append((score, relative, float(angle), location))
+    # Piezas casi simetricas empatan entre giros: se prefiere el giro menor (lo normal es no darla vuelta).
+    found.sort(key=lambda item: -(item[0] - 0.02 * min(item[2], 360.0 - item[2]) / 180.0))
+    chosen: list[tuple[float, float, float, tuple[int, int]]] = []
+    for item in found:   # distintos: no el mismo lugar con giros vecinos
+        radius = 0.5 * math.hypot(gw, gh) * coarse * item[1]
+        if all(
+            math.hypot(item[3][0] - o[3][0], item[3][1] - o[3][1]) > radius
+            or min(abs(item[2] - o[2]), 360.0 - abs(item[2] - o[2])) >= 40.0
+            for o in chosen
+        ) and sum(1 for o in chosen if math.hypot(item[3][0] - o[3][0], item[3][1] - o[3][1]) <= radius) < 2:
+            chosen.append(item)
+        if len(chosen) >= keep:
+            break
+
+    # --- fino ---
+    fine = min(1.0, 900.0 / max(test_gray.shape))
+    big = cv2.resize(test_gray, None, fx=fine, fy=fine, interpolation=cv2.INTER_AREA)
+    refined: list[tuple[float, np.ndarray]] = []
+    for score0, relative, angle0, location in chosen:
+        centre = np.array([location[0], location[1]], np.float64) * (fine / coarse)
+        built0 = build(coarse * relative, angle0)
+        if built0 is None:
+            continue
+        centre = centre + built0[0].shape[0] / 2.0 * (fine / coarse)
+        best: tuple[float, np.ndarray] | None = None
+        for rel in (relative * 0.93, relative, relative * 1.07):
+            for angle in (angle0 - 8, angle0 - 4, angle0, angle0 + 4, angle0 + 8):
+                built = build(fine * rel, float(angle))
+                if built is None:
+                    continue
+                templ, mask, matrix = built
+                half = templ.shape[0] / 2.0
+                margin = 0.35 * templ.shape[0]
+                x0, y0 = int(max(0, centre[0] - half - margin)), int(max(0, centre[1] - half - margin))
+                x1, y1 = int(min(big.shape[1], centre[0] + half + margin)), int(min(big.shape[0], centre[1] + half + margin))
+                window = big[y0:y1, x0:x1]
+                score, location2 = match(window, templ, mask)
+                if score <= 0:
+                    continue
+                to_test = np.eye(3)
+                to_test[:2, 2] = [x0 + location2[0], y0 + location2[1]]
+                golden_to_big = to_test @ matrix                                   # patron -> foto reducida (fino)
+                golden_to_test = np.diag([1.0 / fine, 1.0 / fine, 1.0]) @ golden_to_big
+                if best is None or score > best[0]:
+                    best = (score, np.linalg.inv(golden_to_test))
+        if best is not None:
+            refined.append(best)
+    refined.sort(key=lambda item: -item[0])
+    return [matrix for _, matrix in refined]
+
+
+def _try_candidate(
+    golden: np.ndarray, test: np.ndarray, matrix: np.ndarray, method: str, inliers: int, matches: int,
+) -> tuple[Alignment, np.ndarray]:
+    """Afina y VERIFICA un alineamiento candidato. Lanza `_Rejected` si no es la pieza."""
     linear = matrix[:2, :2] / matrix[2, 2]
     object_scale = 1.0 / max(math.sqrt(abs(np.linalg.det(linear))), 1e-9)   # >1: el objeto se ve mas grande en la foto
-    if method == "PUNTOS" and not (0.15 <= object_scale <= 8.0 and np.isfinite(matrix).all()):
-        raise CompareInconclusive(
-            "No se encontro la pieza patron en la foto: lo que coincide tiene un tamano imposible. "
-            "Verifique que sea la pieza correcta y que se vea completa y enfocada."
-        )
+    if not (0.15 <= object_scale <= 8.0 and np.isfinite(matrix).all()):
+        raise _Rejected("tamano imposible")
     rotation = math.degrees(math.atan2(-linear[1, 0], linear[0, 0]))
     test_scale = 1.0
     if object_scale > 1.35:
@@ -260,27 +377,71 @@ def align(golden: np.ndarray, test: np.ndarray) -> tuple[Alignment, np.ndarray]:
         matrix = matrix @ np.diag([1.0 / factor, 1.0 / factor, 1.0])
         test_scale = factor
 
-    warped = cv2.warpPerspective(test, matrix, (golden.shape[1], golden.shape[0]), flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_REPLICATE)
+    size = (golden.shape[1], golden.shape[0])
+    warped = cv2.warpPerspective(test, matrix, size, flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_REPLICATE)
     correction, ecc = _refine_ecc(golden, warped)
     if correction is not None:
         matrix = correction @ matrix
         method += "+ECC"
-    elif method == "ENCUADRE":
-        raise CompareInconclusive(
-            "No fue posible alinear la foto con la pieza patron: se encontraron muy pocos puntos en comun. "
-            "Verifique que sea la pieza correcta, el enfoque y la iluminacion, y que el recorte la incluya."
-        )
+        warped = cv2.warpPerspective(test, matrix, size, flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_REPLICATE)
     if ecc is not None and ecc < MIN_ECC:
-        raise CompareInconclusive(
-            "Lo que se encontro en la foto no coincide con la pieza patron (correlacion "
-            f"{ecc:.2f}). Verifique que sea la pieza correcta."
-        )
-    coverage = float(_coverage_mask(golden, test, matrix).mean())
+        raise _Rejected(f"correlacion de bordes {ecc:.2f}")
+    covered = _coverage_mask(golden, test, matrix)
+    coverage = float(covered.mean())
+    similarity = _verify(golden, warped, covered)
+    if similarity < (MIN_VERIFY_TEMPLATE if method.startswith("PLANTILLA") else MIN_VERIFY):
+        raise _Rejected(f"no se parece al patron ({similarity:.2f})")
     if method.startswith("ENCUADRE") and (ecc is None or ecc < 0.45):
-        raise CompareInconclusive("La foto no coincide con la pieza patron (alineamiento poco confiable).")
+        raise _Rejected("encuadre sin confirmar")
     if method.startswith("PUNTOS") and ecc is None and inliers < 2 * MIN_MATCHES and coverage < 0.9:
-        raise CompareInconclusive("Alineamiento poco confiable: pocas coincidencias con la pieza patron.")
-    return Alignment(matrix, method, inliers, matches, ecc, coverage, test_scale, object_scale, rotation), test
+        raise _Rejected("pocas coincidencias")
+    return Alignment(matrix, method, inliers, matches, ecc, coverage, test_scale, object_scale, rotation, similarity), test
+
+
+def align(golden: np.ndarray, test: np.ndarray) -> tuple[Alignment, np.ndarray]:
+    """Busca el patron dentro de `test` (cualquier posicion, giro o tamano) y los alinea.
+
+    Orden: (1) puntos SIFT; (2) busqueda por plantilla en toda la foto (piezas lisas o cuando los puntos cayeron en
+    el fondo); (3) mismo encuadre. Cada candidato se verifica contra el patron antes de aceptarlo.
+    Devuelve la alineacion y la foto realmente usada (se reduce si el objeto se ve mucho mas grande que en el
+    patron). `Alignment.matrix` lleva la foto usada al marco del patron.
+    """
+    reasons: list[str] = []
+    passed: list[tuple[Alignment, np.ndarray]] = []
+    matrix, inliers, matches = _match_points(golden, test)
+    if matrix is not None and inliers >= MIN_MATCHES:
+        try:
+            found = _try_candidate(golden, test, matrix, "PUNTOS", inliers, matches)
+            if inliers >= 2 * MIN_MATCHES:
+                return found                      # muchas coincidencias verificadas: es esa
+            passed.append(found)
+        except _Rejected as error:
+            reasons.append(f"puntos: {error}")
+    else:
+        reasons.append("puntos: muy pocas coincidencias")
+
+    # Piezas lisas o con el fondo parecido: busqueda por plantilla; gana el candidato que mas se parece al patron
+    # (desempata piezas casi simetricas, donde dos giros se ven casi igual).
+    for number, candidate in enumerate(_template_candidates(golden, test), start=1):
+        try:
+            passed.append(_try_candidate(golden, test, candidate, "PLANTILLA", 0, matches))
+        except _Rejected as error:
+            reasons.append(f"plantilla {number}: {error}")
+    if passed:
+        return max(passed, key=lambda item: item[0].verify - 0.02 * min(abs(item[0].rotation_deg), 180.0) / 180.0)
+
+    if _similar_framing(golden, test):
+        blind = np.diag([golden.shape[1] / test.shape[1], golden.shape[0] / test.shape[0], 1.0])
+        try:
+            return _try_candidate(golden, test, blind, "ENCUADRE", 0, matches)
+        except _Rejected as error:
+            reasons.append(f"encuadre: {error}")
+
+    raise CompareInconclusive(
+        "No se encontro la pieza patron en la foto. Verifique que sea la pieza correcta, que se vea completa y "
+        "enfocada y que la iluminacion sea parecida a la del patron; si el fondo es muy parecido a la pieza, "
+        "recorte la zona donde esta. (" + "; ".join(reasons) + ")"
+    )
 
 
 def _coverage_mask(golden: np.ndarray, test: np.ndarray, matrix: np.ndarray) -> np.ndarray:
