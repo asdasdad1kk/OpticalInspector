@@ -109,6 +109,36 @@ def test_errors() -> None:
     print("errores y NO CONCLUYENTE: OK")
 
 
+def test_thin_pen_mark() -> None:
+    """Una raya fina de pluma sobre una hoja se detecta; las marcas por debajo del umbral se avisan, no se ocultan."""
+    from modules.compare.engine import compare
+
+    rng = np.random.default_rng(3)
+    h, w = 1700, 2400
+    yy, xx = np.mgrid[0:h, 0:w]
+    sheet = np.clip(np.full((h, w, 3), 215, np.float32) + (10 * np.sin(xx / 700) + 6 * np.cos(yy / 500))[..., None], 0, 255).astype(np.uint8)
+    cv2.putText(sheet, "FORMATO 12-B", (300, 400), cv2.FONT_HERSHEY_SIMPLEX, 3, (40, 40, 40), 6, cv2.LINE_AA)
+    cv2.rectangle(sheet, (300, 700), (2000, 1500), (60, 60, 60), 3)
+
+    def shot(pen=None) -> np.ndarray:
+        image = sheet.copy()
+        if pen:
+            cv2.line(image, (900, 900), (1500, 1200), pen, 2, cv2.LINE_AA)
+        noisy = image.astype(np.float32) + rng.normal(0, 3.5, image.shape[:2])[..., None]
+        return cv2.GaussianBlur(np.clip(noisy, 0, 255).astype(np.uint8), (0, 0), 0.9)
+
+    golden = shot()
+    clean = compare(golden, shot(), "estricto")["report"]
+    assert clean["status"] == "OK", clean["summary"]
+    for pen in ((190, 120, 70), (70, 70, 70)):
+        report = compare(golden, shot(pen), "estricto")["report"]
+        assert report["regions"], f"no detecto la raya {pen}"
+    faint = compare(golden, shot((205, 170, 150)), "maximo")["report"]
+    assert faint["regions"], "la sensibilidad maxima debe ver una raya tenue"
+    assert "peak_delta_e" in faint["metrics"] and "near_misses" in faint
+    print("raya fina de pluma: OK")
+
+
 def test_separate_database() -> None:
     """Los datos del comparador viven en su archivo; el de paneles no se toca ni se crea."""
     tables = {r[0] for r in sqlite3.connect(TMP / "compare.db").execute("SELECT name FROM sqlite_master WHERE type='table'")}
@@ -120,5 +150,6 @@ def test_separate_database() -> None:
 if __name__ == "__main__":
     test_flow()
     test_errors()
+    test_thin_pen_mark()
     test_separate_database()
     print("TODO OK")

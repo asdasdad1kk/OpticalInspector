@@ -44,14 +44,22 @@ Si la foto no permite decidir (no se alinea, está borrosa, muy oscura, demasiad
 | Qué | Dónde | Efecto |
 |---|---|---|
 | Sensibilidad por defecto: **estricto** | `PRESETS` / `DEFAULT_PRESET` en `engine.py` | `delta_e` (ΔE mínimo), `edge` (fuerza de borde mínima), `min_area_pct` (zona mínima, % de la pieza), `review_pct`, `fail_pct` |
-| Ruido tolerado | `NOISE_SIGMAS` (6) | más alto = ignora más ruido de la foto |
+| Ruido tolerado | `noise_sigmas` de cada preset (`NOISE_SIGMAS` = 6 por defecto) | más bajo = ve marcas más débiles (pero más falsos positivos si la foto es ruidosa) |
+| Marcas finas e intensas | `STRONG_FACTOR` (2.5) | una marca ≥ 2.5 × el umbral cuenta aunque sea menor que `min_area_pct` |
 | Desplazamiento tolerado | `TOLERANCE_FRACTION` | más alto = admite más movimiento entre fotos (y detecta menos desplazamientos pequeños) |
 | Brillos quemados | `SATURATED_L` (247), `MAX_EXCLUDED` | qué se considera reflejo y cuánto puede haber |
 | Calidad mínima de la foto | `limits` en `compare()` | nitidez, brillo, contraste, % saturado (también por `min_quality`) |
 | Tamaño de trabajo | `WORK_SIDE` (1400 px) | más alto = detecta cosas más finas, más lento |
 | Textos de causas y tipos | `_explain`, `KIND_LABEL` | para afinar el lenguaje o agregar tipos |
 
-La sensibilidad también se elige en pantalla (estricto / normal / tolerante) y se recuerda en el equipo.
+## Si una marca fina no se detecta (p. ej. raya de pluma)
+
+1. Mire el informe: **«Umbral dE» y «mayor diferencia de color encontrada»**. Si lo encontrado es menor que el umbral, la marca queda por debajo; y las que quedan entre 50 % y 100 % del umbral se listan como **marcas débiles (cuadros grises)**.
+2. Cambie la sensibilidad a **Máximo** (ΔE ≥ 5, zonas desde 0.003 %, ruido 3.5σ). Es lo primero que hay que mover.
+3. Si aun así no sale: baje `delta_e`/`edge` del preset `maximo` o su `noise_sigmas` (ej. 3.0), y reduzca `min_area_pct`. Si la foto es muy ruidosa, mejor mejorar la luz/enfoque que bajar umbrales.
+4. El mapa de calor es una vista **sin umbral**: puede mostrar cosas claras que el umbral aún no considera diferencia.
+
+La sensibilidad también se elige en pantalla (máximo / estricto / normal / tolerante) y se recuerda en el equipo.
 
 ## Datos
 

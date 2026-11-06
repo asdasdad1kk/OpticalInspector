@@ -32,14 +32,18 @@ MIN_COVERAGE = 0.80             # fraccion del patron que debe quedar cubierta p
 MAX_EXCLUDED = 0.45             # fraccion maxima excluida (brillos saturados / sin dato) para poder decidir
 SATURATED_L = 247.0             # L (0-255) desde la cual un pixel se considera reflejo/quemado
 TOLERANCE_FRACTION = 0.0035     # desplazamiento admitido por el alineamiento, fraccion del lado mayor
+STRONG_FACTOR = 2.5              # marca con intensidad >= 2.5 veces el umbral: cuenta aunque sea menor al area minima
 NOISE_SIGMAS = 6.0              # umbral adaptativo: mediana + k * MAD del mapa de diferencias
 
 # Cada preset: (dE minimo de color, fuerza minima de borde, area minima de region en % de la pieza,
 #               % de area anomala para REVISAR, para FALLO). "estricto" es el valor por defecto.
+# `noise_sigmas`: cuanto sube el umbral con el ruido de la propia foto (mediana + k * MAD); menor = ve marcas mas debiles.
+# "maximo" es para marcas muy finas o tenues (pluma, rayones, manchas leves) en piezas de fondo limpio.
 PRESETS: dict[str, dict[str, float]] = {
-    "estricto": {"delta_e": 9.0, "edge": 0.16, "min_area_pct": 0.012, "review_pct": 0.04, "fail_pct": 0.60},
-    "normal": {"delta_e": 13.0, "edge": 0.24, "min_area_pct": 0.04, "review_pct": 0.15, "fail_pct": 1.50},
-    "tolerante": {"delta_e": 19.0, "edge": 0.36, "min_area_pct": 0.12, "review_pct": 0.50, "fail_pct": 4.00},
+    "maximo": {"delta_e": 5.0, "edge": 0.08, "min_area_pct": 0.003, "review_pct": 0.01, "fail_pct": 0.30, "noise_sigmas": 3.5},
+    "estricto": {"delta_e": 9.0, "edge": 0.16, "min_area_pct": 0.012, "review_pct": 0.04, "fail_pct": 0.60, "noise_sigmas": 6.0},
+    "normal": {"delta_e": 13.0, "edge": 0.24, "min_area_pct": 0.04, "review_pct": 0.15, "fail_pct": 1.50, "noise_sigmas": 6.0},
+    "tolerante": {"delta_e": 19.0, "edge": 0.36, "min_area_pct": 0.12, "review_pct": 0.50, "fail_pct": 4.00, "noise_sigmas": 7.0},
 }
 DEFAULT_PRESET = "estricto"
 
@@ -275,13 +279,13 @@ def _edge_maps(
     return cv2.GaussianBlur(extra, (0, 0), 1.0), cv2.GaussianBlur(missing, (0, 0), 1.0), g, t
 
 
-def _adaptive(values: np.ndarray, valid: np.ndarray, minimum: float) -> float:
+def _adaptive(values: np.ndarray, valid: np.ndarray, minimum: float, sigmas: float = NOISE_SIGMAS) -> float:
     sample = values[valid]
     if sample.size == 0:
         return minimum
     median = float(np.median(sample))
     mad = float(np.median(np.abs(sample - median))) * 1.4826
-    return max(minimum, median + NOISE_SIGMAS * mad)
+    return max(minimum, median + sigmas * mad)
 
 
 # ---------------------------------------------------------------------------
@@ -463,8 +467,9 @@ def compare(
     color, sign = _tolerant_color(golden_lab, test_lab, radius)
     edge_extra, edge_missing, energy_g, energy_t = _edge_maps(_gray(golden), _gray(warped), radius)
 
-    t_color = _adaptive(color, valid, preset["delta_e"])
-    t_edge = _adaptive(np.maximum(edge_extra, edge_missing), valid, preset["edge"])
+    sigmas = preset.get("noise_sigmas", NOISE_SIGMAS)
+    t_color = _adaptive(color, valid, preset["delta_e"], sigmas)
+    t_edge = _adaptive(np.maximum(edge_extra, edge_missing), valid, preset["edge"], sigmas)
     anomalous = ((color > t_color) | (edge_extra > t_edge) | (edge_missing > t_edge)) & valid
     mask = anomalous.astype(np.uint8) * 255
     merge = max(3, int(0.012 * max(width, height)) | 1)
@@ -478,10 +483,15 @@ def compare(
     regions: list[dict[str, Any]] = []
     for index in range(1, count):
         x, y, w, h, area = (int(v) for v in stats[index])
-        if area < min_area:
+        if area < max(12.0, min_area / 5.0):
             continue
         inside = (labels == index) & valid
         if not inside.any():
+            continue
+        # Una marca muy intensa (pluma, rayon) cuenta aunque sea mas chica que el area minima.
+        strong = float(np.percentile(color[inside], 98)) >= STRONG_FACTOR * t_color or float(
+            np.maximum(edge_extra, edge_missing)[inside].max()) >= STRONG_FACTOR * t_edge
+        if area < min_area and not strong:
             continue
         g_bgr = golden[inside].mean(axis=0)
         t_bgr = warped[inside].mean(axis=0)
@@ -522,6 +532,7 @@ def compare(
         region.update(kind=kind, kind_label=KIND_LABEL[kind], facts=facts, probable_cause=cause)
         regions.append(region)
 
+    near_misses = _near_misses(color, edge_extra, edge_missing, valid, mask, t_color, t_edge, min_area, width, height)
     regions.sort(key=lambda r: ({"critica": 0, "moderada": 1, "leve": 2}[r["severity"]], -r["area_pct"]))
     regions = regions[:40]
     for number, region in enumerate(regions, start=1):
@@ -538,11 +549,14 @@ def compare(
     ssim = _ssim(golden_gray, test_gray, valid)
     score = float(np.clip(100.0 - 22.0 * math.sqrt(total_pct) - 4.0 * len(regions) + 12.0 * (ssim - 0.9), 0, 100)) if regions else float(np.clip(80 + 20 * ssim, 0, 100))
 
-    images = _render(golden, warped, mask, regions, color, edge_extra, edge_missing, valid, glare & covered)
+    images = _render(golden, warped, mask, regions, color, edge_extra, edge_missing, valid, glare & covered, near_misses)
     report = {
         "status": status,
         "score": round(score, 1),
-        "summary": _summary(status, regions, total_pct, excluded, alignment),
+        "summary": _summary(status, regions, total_pct, excluded, alignment) + (
+            f" Hay {len(near_misses)} marca(s) debil(es) bajo el umbral que no cuentan (cuadros grises): "
+            "si es algo real, suba la sensibilidad a «maximo»." if near_misses else ""
+        ),
         "regions": regions,
         "metrics": {
             "anomalous_area_pct": total_pct,
@@ -552,6 +566,8 @@ def compare(
             "threshold_delta_e": round(float(t_color), 1),
             "threshold_edge": round(float(t_edge), 3),
             "tolerance_px": radius,
+            "peak_delta_e": round(float(np.percentile(color[valid], 99.9)), 1) if valid.any() else 0.0,
+            "near_misses": len(near_misses),
             "work_size": [width, height],
         },
         "alignment": {
@@ -560,10 +576,38 @@ def compare(
             "coverage_pct": round(100.0 * alignment.coverage, 1),
         },
         "quality": quality,
+        "near_misses": near_misses,
         "sensitivity": sensitivity if sensitivity in PRESETS else DEFAULT_PRESET,
         "preset": preset,
     }
     return {"report": report, "images": images, "golden_work": golden, "test_aligned": warped}
+
+
+def _near_misses(
+    color: np.ndarray, edge_extra: np.ndarray, edge_missing: np.ndarray, valid: np.ndarray, mask: np.ndarray,
+    t_color: float, t_edge: float, min_area: float, width: int, height: int,
+) -> list[dict[str, Any]]:
+    """Marcas debiles que NO superaron el umbral (para que el operador sepa que hay algo y pueda subir la sensibilidad)."""
+    edges = np.maximum(edge_extra, edge_missing)
+    weak = ((color > 0.5 * t_color) | (edges > 0.5 * t_edge)) & valid
+    weak = cv2.morphologyEx(weak.astype(np.uint8) * 255, cv2.MORPH_CLOSE, np.ones((5, 5), np.uint8))
+    near_final = cv2.dilate(mask, np.ones((15, 15), np.uint8)) > 0
+    count, labels, stats, centroids = cv2.connectedComponentsWithStats(weak)
+    found: list[dict[str, Any]] = []
+    for index in range(1, count):
+        x, y, w, h, area = (int(v) for v in stats[index])
+        inside = (labels == index) & valid
+        if area < max(20.0, min_area / 3.0) or not inside.any() or near_final[inside].mean() > 0.3:
+            continue
+        peak = float(np.percentile(color[inside], 98))
+        ratio = max(peak / t_color, float(edges[inside].max()) / t_edge)
+        found.append({
+            "x": x, "y": y, "w": w, "h": h, "area_px": int(inside.sum()),
+            "zone": _zone_name(float(centroids[index][0]), float(centroids[index][1]), width, height),
+            "delta_e_max": round(peak, 1), "ratio": round(ratio, 2),
+        })
+    found.sort(key=lambda item: -item["ratio"])
+    return found[:8]
 
 
 def _ssim(a: np.ndarray, b: np.ndarray, valid: np.ndarray) -> float:
@@ -618,6 +662,7 @@ SEVERITY_BGR = {"critica": (60, 60, 255), "moderada": (0, 165, 255), "leve": (0,
 def _render(
     golden: np.ndarray, warped: np.ndarray, mask: np.ndarray, regions: list[dict[str, Any]],
     color: np.ndarray, edge_extra: np.ndarray, edge_missing: np.ndarray, valid: np.ndarray, glare: np.ndarray,
+    near_misses: list[dict[str, Any]] | None = None,
 ) -> dict[str, np.ndarray]:
     scale = max(1, round(max(warped.shape[:2]) / 700))
     thick = max(2, scale + 1)
@@ -625,6 +670,9 @@ def _render(
     shade = annotated.copy()
     shade[glare] = (shade[glare] * 0.5 + np.array([255, 120, 0]) * 0.5).astype(np.uint8)  # azul = no evaluable
     annotated = cv2.addWeighted(shade, 0.35, annotated, 0.65, 0)
+    for miss in near_misses or []:
+        pad = 4 * scale
+        cv2.rectangle(annotated, (miss["x"] - pad, miss["y"] - pad), (miss["x"] + miss["w"] + pad, miss["y"] + miss["h"] + pad), (170, 170, 170), 1, cv2.LINE_AA)
     for region in regions:
         c = SEVERITY_BGR[region["severity"]]
         pad = 6 * scale

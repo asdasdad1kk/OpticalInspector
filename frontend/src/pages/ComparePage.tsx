@@ -591,6 +591,24 @@ export default function ComparePage() {
                   </div>
                 ))}
               </dl>
+              <p className="text-xs text-zinc-500">
+                Umbral dE {report.metrics.threshold_delta_e} · mayor diferencia de color encontrada {report.metrics.peak_delta_e}
+              </p>
+              {report.near_misses.length > 0 && (
+                <div className="rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-2 text-xs text-zinc-400">
+                  <p className="font-semibold text-zinc-300">
+                    {report.near_misses.length} marca(s) débil(es) bajo el umbral (cuadros grises, no cuentan)
+                  </p>
+                  <ul className="mt-1 space-y-0.5">
+                    {report.near_misses.slice(0, 5).map((miss, index) => (
+                      <li key={index}>
+                        {miss.zone}: {miss.area_px} px, dE {miss.delta_e_max} ({Math.round(miss.ratio * 100)} % del umbral)
+                      </li>
+                    ))}
+                  </ul>
+                  {report.sensitivity !== "maximo" && <p className="mt-1">Si es algo real, cambie la sensibilidad a «Maximo» e inspeccione de nuevo.</p>}
+                </div>
+              )}
               <p className="text-[11px] text-zinc-600">
                 {report.part.name} rev. {report.part.revision} · alineamiento {report.alignment.method.toLowerCase()} (
                 {report.alignment.inliers} puntos, cobertura {report.alignment.coverage_pct}%) · sensibilidad {report.sensitivity}

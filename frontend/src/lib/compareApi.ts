@@ -2,7 +2,7 @@ import { API_URL } from "./api";
 import type { CropRect } from "../types/api";
 
 export type CompareVerdict = "OK" | "REVISAR" | "FALLO";
-export type Sensitivity = "estricto" | "normal" | "tolerante";
+export type Sensitivity = "maximo" | "estricto" | "normal" | "tolerante";
 export type Severity = "leve" | "moderada" | "critica";
 
 export interface ComparePart {
@@ -52,7 +52,11 @@ export interface CompareReport {
     similarity: number;
     excluded_pct: number;
     work_size: [number, number];
+    threshold_delta_e: number;
+    peak_delta_e: number;
+    near_misses: number;
   };
+  near_misses: { x: number; y: number; w: number; h: number; zone: string; area_px: number; delta_e_max: number; ratio: number }[];
   alignment: { method: string; inliers: number; coverage_pct: number; ecc: number | null };
   quality: { sharpness: number; brightness: number };
   sensitivity: Sensitivity;
