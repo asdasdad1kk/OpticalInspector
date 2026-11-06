@@ -17,3 +17,4 @@ logs/crash.log
 **/optical_compare.db*
 **/optical_inspector.db-wal
 **/optical_inspector.db-shm
+installer/vendor/

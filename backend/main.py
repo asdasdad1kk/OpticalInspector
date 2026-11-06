@@ -36,6 +36,10 @@ try:  # el escaner 3D es independiente: si falla al cargar, el resto de la app a
     from modules.scanner3d.router import router as scanner_router
 except Exception as _scanner_error:  # pragma: no cover
     scanner_router = None
+try:  # lectura de codigos / OCR: opcional, si falla al cargar el resto arranca igual
+    from modules.reading.router import router as reading_router
+except Exception as _reading_error:  # pragma: no cover
+    reading_router = None
 try:  # el comparador general es independiente de los paneles: si falla al cargar, el resto arranca igual
     from modules.compare import store as compare_store
     from modules.compare.router import router as compare_router
@@ -195,6 +199,12 @@ app.include_router(
 if scanner_router is not None:
     app.include_router(
         scanner_router,
+        prefix="/api",
+    )
+
+if reading_router is not None:
+    app.include_router(
+        reading_router,
         prefix="/api",
     )
 

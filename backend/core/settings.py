@@ -57,6 +57,23 @@ SECTION_SCHEMAS: dict[str, dict[str, tuple[type, float, float]]] = {
         "keep": (int, 1, 365),
         "interval_hours": (float, 1, 720),
     },
+    "reading": {
+        "codes_enabled": (bool, 0, 1),
+        "text_enabled": (bool, 0, 1),
+        "psm": (int, 3, 13),
+        "min_text_confidence": (float, 0, 100),
+        "timeout_s": (float, 1, 60),
+    },
+}
+
+# Campos de texto con valores permitidos (seccion -> campo -> opciones).
+CHOICE_FIELDS: dict[str, dict[str, tuple[str, ...]]] = {
+    "reading": {
+        "languages": ("spa+eng", "eng", "spa"),
+        "code_formats": ("comunes", "2d", "lineales", "todos"),
+        "unreadable_status": ("REVISAR", "FALLO"),
+        "mismatch_status": ("REVISAR", "FALLO"),
+    },
 }
 
 DEFAULTS: dict[str, Any] = {
@@ -88,6 +105,18 @@ DEFAULTS: dict[str, Any] = {
     "calibration": {"apply": True, "square_mm": 30.0},
     "dxf": {"default_unit": "mm"},
     "backup": {"enabled": True, "keep": 14, "interval_hours": 24},
+    # Lectura de codigos y texto (OCR). El OCR solo se ejecuta si una pieza tiene zonas de texto.
+    "reading": {
+        "codes_enabled": True,
+        "text_enabled": True,
+        "languages": "spa+eng",
+        "psm": 7,
+        "min_text_confidence": 60.0,
+        "timeout_s": 8.0,
+        "code_formats": "comunes",
+        "unreadable_status": "REVISAR",
+        "mismatch_status": "FALLO",
+    },
     "parts": {},
 }
 
@@ -186,7 +215,13 @@ class SettingsStore:
                 raise ValueError(f"default_unit debe ser uno de {DXF_UNITS}.")
             clean: dict[str, Any] = {"default_unit": unit}
         elif section in SECTION_SCHEMAS:
-            clean = _validate_section(values, SECTION_SCHEMAS[section])
+            choices = CHOICE_FIELDS.get(section, {})
+            clean = _validate_section({k: v for k, v in values.items() if k not in choices}, SECTION_SCHEMAS[section])
+            for key, allowed in choices.items():
+                if key in values:
+                    if values[key] not in allowed:
+                        raise ValueError(f"{key} debe ser uno de {allowed}.")
+                    clean[key] = values[key]
         else:
             raise ValueError(f"Seccion desconocida: {section}.")
         if section == "inspection":
