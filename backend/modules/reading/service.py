@@ -181,6 +181,34 @@ def read_zones(image: np.ndarray, zones: list[dict[str, Any]], scale: float = 1.
     return [read_zone(image, zone, scale, config) for zone in zones]
 
 
+def read_zones_mapped(
+    photo: np.ndarray, reference_from_photo: np.ndarray, zones: list[dict[str, Any]], upscale: float = 1.0,
+) -> list[tuple[dict[str, Any], np.ndarray]]:
+    """Lee zonas definidas en la imagen de referencia sobre una foto con otra posicion/giro/tamano.
+
+    `reference_from_photo` (3x3) lleva pixeles de la foto a la referencia. Cada zona se "endereza" desde la foto
+    original (sin pasar por la imagen reducida de trabajo) con `upscale` px por px de referencia, para no
+    perder la resolucion que tenga la foto. Devuelve [(resultado, recorte enderezado)].
+    """
+    import cv2  # noqa: PLC0415
+
+    config = settings()
+    out: list[tuple[dict[str, Any], np.ndarray]] = []
+    factor = float(np.clip(upscale, 1.0, 4.0))
+    for zone in zones:
+        margin = 0.25 if zone["kind"] == "code" else 0.08
+        x0, y0 = zone["x"] - margin * zone["w"], zone["y"] - margin * zone["h"]
+        width = int(round(zone["w"] * (1 + 2 * margin) * factor))
+        height = int(round(zone["h"] * (1 + 2 * margin) * factor))
+        window = np.array([[factor, 0, -x0 * factor], [0, factor, -y0 * factor], [0, 0, 1]], np.float64)
+        crop = cv2.warpPerspective(photo, window @ reference_from_photo, (max(width, 8), max(height, 8)),
+                                   flags=cv2.INTER_CUBIC, borderMode=cv2.BORDER_REPLICATE)
+        local = {**zone, "x": margin * zone["w"], "y": margin * zone["h"]}
+        result = read_zone(crop, local, factor, config)
+        out.append((result, crop))
+    return out
+
+
 def worst_status(results: list[dict[str, Any]]) -> str:
     order = {"OK": 0, "OMITIDO": 0, "REVISAR": 1, "FALLO": 2}
     worst = max((order.get(r["status"], 0) for r in results), default=0)

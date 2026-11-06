@@ -45,10 +45,11 @@ async def create_part(
     name: str = Form(...),
     description: str = Form(""),
     crop: str | None = Form(None),
+    readings: str | None = Form(None),
     photo: UploadFile = File(...),
 ) -> dict[str, Any]:
     try:
-        return service.create_part(name, description, await photo.read(), crop)
+        return service.create_part(name, description, await photo.read(), crop, readings)
     except _ERRORS as error:
         raise _http(error) from error
 
@@ -78,6 +79,14 @@ class PartPatch(BaseModel):
 def patch_part(part_id: int, body: PartPatch) -> dict[str, Any]:
     try:
         return service.rename_part(part_id, body.name, body.description)
+    except _ERRORS as error:
+        raise _http(error) from error
+
+
+@router.put("/parts/{part_id}/readings")
+def put_readings(part_id: int, zones: list[dict[str, Any]]) -> dict[str, Any]:
+    try:
+        return service.set_part_readings(part_id, zones)
     except _ERRORS as error:
         raise _http(error) from error
 

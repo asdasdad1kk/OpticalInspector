@@ -25,6 +25,7 @@ CREATE TABLE IF NOT EXISTS part (
     height INTEGER NOT NULL,
     crop_json TEXT,
     quality_json TEXT,
+    reading_json TEXT,
     active INTEGER NOT NULL DEFAULT 1,
     created_at TEXT NOT NULL
 );
@@ -70,6 +71,10 @@ def init() -> None:
         try:
             with connection:
                 connection.executescript(_SCHEMA)
+                # Columnas agregadas despues de la primera version.
+                columns = {row[1] for row in connection.execute("PRAGMA table_info(part)")}
+                if "reading_json" not in columns:
+                    connection.execute("ALTER TABLE part ADD COLUMN reading_json TEXT")
         finally:
             connection.close()
         _ready = True
@@ -97,7 +102,7 @@ def _row(row: sqlite3.Row | None) -> dict[str, Any] | None:
 
 def add_part(
     name: str, description: str, image_path: str, width: int, height: int,
-    crop: dict[str, int] | None, quality: dict[str, float],
+    crop: dict[str, int] | None, quality: dict[str, float], readings: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Guarda una pieza patron. Si ya existe el nombre, es una nueva revision (la anterior se conserva)."""
     with session() as db:
@@ -105,9 +110,10 @@ def add_part(
         revision = (last or 0) + 1
         db.execute("UPDATE part SET active = 0 WHERE name = ? COLLATE NOCASE", (name,))
         cursor = db.execute(
-            "INSERT INTO part (name, revision, description, image_path, width, height, crop_json, quality_json, active, created_at)"
-            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?)",
-            (name, revision, description, image_path, width, height, json.dumps(crop), json.dumps(quality), _now()),
+            "INSERT INTO part (name, revision, description, image_path, width, height, crop_json, quality_json,"
+            " reading_json, active, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?)",
+            (name, revision, description, image_path, width, height, json.dumps(crop), json.dumps(quality),
+             json.dumps(readings or []), _now()),
         )
         return get_part(cursor.lastrowid, db)  # type: ignore[arg-type,return-value]
 
@@ -158,6 +164,21 @@ def delete_part(part_id: int) -> list[str]:
                 " ORDER BY revision DESC LIMIT 1)", (part["name"],),
             )
         return [part["image_path"]]
+
+
+def set_readings(part_id: int, readings: list[dict[str, Any]]) -> dict[str, Any] | None:
+    with session() as db:
+        if get_part(part_id, db) is None:
+            return None
+        db.execute("UPDATE part SET reading_json = ? WHERE id = ?", (json.dumps(readings), part_id))
+        return get_part(part_id, db)
+
+
+def readings_of(part: dict[str, Any]) -> list[dict[str, Any]]:
+    try:
+        return json.loads(part.get("reading_json") or "[]")
+    except (TypeError, ValueError):
+        return []
 
 
 def update_part(part_id: int, name: str | None, description: str | None) -> dict[str, Any] | None:

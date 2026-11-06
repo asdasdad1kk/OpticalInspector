@@ -124,6 +124,60 @@ def test_golden_is_a_crop_of_the_photo() -> None:
     print("patron recortado, inspeccion con foto completa (cualquier posicion/giro): OK")
 
 
+def _code(fmt: str, text: str, module_px: int) -> np.ndarray:
+    import zxingcpp
+
+    image = np.array(zxingcpp.write_barcode_to_image(zxingcpp.create_barcode(text, getattr(zxingcpp.BarcodeFormat, fmt)), scale=module_px))
+    return cv2.cvtColor(image, cv2.COLOR_GRAY2BGR) if image.ndim == 2 else image
+
+
+def _labelled(photo: np.ndarray, qr: str, serial: str) -> np.ndarray:
+    """La foto de la tira con una etiqueta: un QR y un Code128 pegados sobre la pieza."""
+    out = photo.copy()
+    q = _code("QRCode", qr, 4)
+    b = _code("Code128", serial, 2)
+    out[350:350 + q.shape[0], 1080:1080 + q.shape[1]] = q
+    out[455:455 + b.shape[0], 1300:1300 + b.shape[1]] = b
+    return out
+
+
+def test_reading_zones() -> None:
+    """Zonas de lectura del patron: se leen en la foto aunque la pieza este movida, y se validan."""
+    photo = cv2.imread(str(BRIO))
+    good = _labelled(photo, "OI-SERIE-0042", "PN-7731-B")
+    zones = json.dumps([
+        {"name": "QR", "kind": "code", "rule": "equals", "expected": "OI-SERIE-0042", "x": 1070, "y": 340, "w": 150, "h": 150},
+        {"name": "Serie", "kind": "code", "rule": "regex", "pattern": r"PN-\d{4}-[A-Z]", "x": 1290, "y": 445, "w": 300, "h": 100},
+    ])
+    created = client.post("/api/compare/parts", data={"name": "Etiquetada", "crop": crop_form(), "readings": zones},
+                          files={"photo": ("a.jpg", jpeg(good), "image/jpeg")})
+    assert created.status_code == 200, created.text
+    assert len(created.json()["readings"]) == 2 and created.json()["readings"][0]["x"] == 1070 - PIECE[0]
+
+    h, w = good.shape[:2]
+    matrix = cv2.getRotationMatrix2D((w / 2, h / 2), 6, 0.9)
+    matrix[0, 2] += 30
+    moved = cv2.warpAffine(good, matrix, (w, h), borderMode=cv2.BORDER_REPLICATE)
+    report = client.post("/api/compare/inspect", data={"part_name": "Etiquetada"}, files={"photo": ("b.jpg", jpeg(moved), "image/jpeg")}).json()
+    readings = {r["name"]: r for r in report["readings"]}
+    assert readings["QR"]["status"] == "OK" and readings["QR"]["value"] == "OI-SERIE-0042", readings
+    assert readings["Serie"]["status"] == "OK" and readings["Serie"]["value"] == "PN-7731-B", readings
+    assert client.get(f"/api{report['images']['reading-' + readings['QR']['id']]}").status_code == 200
+
+    wrong = cv2.warpAffine(_labelled(photo, "OI-SERIE-0099", "XX-7731-B"), matrix, (w, h), borderMode=cv2.BORDER_REPLICATE)
+    report = client.post("/api/compare/inspect", data={"part_name": "Etiquetada"}, files={"photo": ("c.jpg", jpeg(wrong), "image/jpeg")}).json()
+    readings = {r["name"]: r for r in report["readings"]}
+    assert readings["QR"]["status"] == "FALLO" and "OI-SERIE-0099" in readings["QR"]["reason"], readings
+    assert readings["Serie"]["status"] == "FALLO", readings
+    assert report["status"] == "FALLO" and "Lecturas" in report["summary"]
+
+    # Zona fuera del area del patron: se rechaza al guardar.
+    outside = json.dumps([{"name": "X", "kind": "code", "rule": "present", "x": 10, "y": 10, "w": 50, "h": 50}])
+    bad = client.post("/api/compare/parts", data={"name": "Mala", "crop": crop_form(), "readings": outside}, files={"photo": ("a.jpg", jpeg(good), "image/jpeg")})
+    assert bad.status_code == 400 and "fuera" in bad.json()["detail"], bad.text
+    print("zonas de lectura en el comparador (pieza movida, valor correcto y distinto): OK")
+
+
 def test_errors() -> None:
     photo = cv2.imread(str(BRIO))
     assert client.post("/api/compare/parts", data={"name": "  "}, files={"photo": ("a.jpg", jpeg(photo), "image/jpeg")}).status_code == 400
@@ -181,6 +235,7 @@ def test_separate_database() -> None:
 if __name__ == "__main__":
     test_flow()
     test_golden_is_a_crop_of_the_photo()
+    test_reading_zones()
     test_errors()
     test_thin_pen_mark()
     test_separate_database()

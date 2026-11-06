@@ -843,7 +843,16 @@ def compare(
     }
     report["located"] = located["info"]
     images["located"] = located["image"]
-    return {"report": report, "images": images, "golden_work": golden, "test_aligned": warped}
+    # Foto ORIGINAL -> patron ORIGINAL (para leer codigos/texto con la resolucion nativa de la foto).
+    golden_from_test = (
+        np.diag([1.0 / g_scale, 1.0 / g_scale, 1.0]) @ alignment.matrix @ np.diag([alignment.test_scale, alignment.test_scale, 1.0])
+    )
+    return {
+        "report": report, "images": images, "golden_work": golden, "test_aligned": warped,
+        # px de la foto original por px del patron original: cuanto ampliar al enderezar una zona.
+        "mapping": {"golden_from_test": golden_from_test,
+                    "object_scale": 1.0 / max(math.sqrt(abs(float(np.linalg.det(golden_from_test[:2, :2] / golden_from_test[2, 2])))), 1e-9)},
+    }
 
 
 def _near_misses(

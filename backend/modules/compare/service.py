@@ -12,6 +12,8 @@ from core import config, storage
 from . import store
 from .engine import PRESETS, CompareInconclusive, compare, image_quality
 
+from modules.reading import service as reading
+
 MAX_SIDE = 4096          # fotos mas grandes se reducen al guardar
 GOLDEN_JPEG_QUALITY = 96
 REPORT_JPEG_QUALITY = 90
@@ -67,13 +69,35 @@ def _encode(image: np.ndarray, quality: int) -> bytes:
 # Piezas patron
 # ---------------------------------------------------------------------------
 
-def create_part(name: str, description: str, photo: bytes, crop_raw: str | None) -> dict[str, Any]:
+def parse_readings(raw: str | list | None, crop: dict[str, int] | None, size: tuple[int, int]) -> list[dict[str, Any]]:
+    """Zonas de lectura dibujadas sobre la FOTO: se pasan a coordenadas del patron (el recorte)."""
+    if not raw:
+        return []
+    try:
+        data = json.loads(raw) if isinstance(raw, str) else raw
+    except ValueError as error:
+        raise CompareError("Las zonas de lectura no son validas.") from error
+    if crop:
+        data = [{**zone, "x": float(zone.get("x", 0)) - crop["x"], "y": float(zone.get("y", 0)) - crop["y"]} for zone in data]
+    try:
+        zones = reading.normalize_zones(data)
+    except ValueError as error:
+        raise CompareError(str(error)) from error
+    width, height = size
+    for zone in zones:
+        if zone["x"] < -2 or zone["y"] < -2 or zone["x"] + zone["w"] > width + 2 or zone["y"] + zone["h"] > height + 2:
+            raise CompareError(f"La zona de lectura «{zone['name']}» queda fuera del area recortada del patron.")
+    return zones
+
+
+def create_part(name: str, description: str, photo: bytes, crop_raw: str | None, readings_raw: str | None = None) -> dict[str, Any]:
     name = " ".join((name or "").split())
     if not name:
         raise CompareError("Escriba el nombre de la pieza.")
     if len(name) > 80:
         raise CompareError("El nombre es demasiado largo (maximo 80 caracteres).")
     image, crop = apply_crop(decode(photo), parse_crop(crop_raw))
+    zones = parse_readings(readings_raw, crop, (image.shape[1], image.shape[0]))
     quality = image_quality(image)
     if quality["sharpness"] < 12.0 or quality["contrast"] < 6.0:
         raise CompareError(
@@ -81,14 +105,23 @@ def create_part(name: str, description: str, photo: bytes, crop_raw: str | None)
             "Tome una foto nitida: el patron es la referencia de todas las inspecciones."
         )
     path = storage.save_bytes(config.COMPARE_DIR, _encode(image, GOLDEN_JPEG_QUALITY), "golden", ".jpg", subdir="golden")
-    part = store.add_part(name, (description or "").strip(), path, image.shape[1], image.shape[0], crop, quality)
+    part = store.add_part(name, (description or "").strip(), path, image.shape[1], image.shape[0], crop, quality, zones)
     return _public_part(part)
 
 
 def _public_part(part: dict[str, Any]) -> dict[str, Any]:
     return {key: part[key] for key in ("id", "name", "revision", "description", "width", "height", "created_at") if key in part} | {
         key: part[key] for key in ("revisions", "inspections", "last_status") if key in part
-    }
+    } | {"readings": store.readings_of(part)}
+
+
+def set_part_readings(part_id: int, raw: list[dict[str, Any]]) -> dict[str, Any]:
+    """Reemplaza las zonas de lectura de un patron (coordenadas del patron)."""
+    part = store.get_part(part_id)
+    if part is None:
+        raise NotFound("La pieza patron no existe.")
+    zones = parse_readings(raw, None, (part["width"], part["height"]))
+    return _public_part(store.set_readings(part_id, zones) or part)
 
 
 def list_parts() -> list[dict[str, Any]]:
@@ -152,6 +185,9 @@ def inspect(
 
     result = compare(golden, test, sensitivity)  # CompareInconclusive sube al router (HTTP 422)
     report = result["report"]
+    zones = store.readings_of(part)
+    if zones:
+        _apply_readings(report, result, test, zones)
     report["crop"] = crop
     report["part"] = {"id": part["id"], "name": part["name"], "revision": part["revision"]}
 
@@ -164,6 +200,26 @@ def inspect(
 
     record = store.add_inspection(part, report, files)
     return public_inspection(record)
+
+
+def _apply_readings(report: dict[str, Any], result: dict[str, Any], test: np.ndarray, zones: list[dict[str, Any]]) -> None:
+    """Lee las zonas del patron en la foto y combina su resultado con el veredicto visual."""
+    mapping = result["mapping"]
+    read = reading.read_zones_mapped(test, mapping["golden_from_test"], zones, upscale=mapping["object_scale"])
+    readings = [item for item, _ in read]
+    for item, crop in read:
+        result["images"][f"reading-{item['id']}"] = crop
+    report["readings"] = readings
+    status = reading.worst_status(readings)
+    order = {"OK": 0, "REVISAR": 1, "FALLO": 2}
+    bad = [r for r in readings if r["status"] in ("REVISAR", "FALLO")]
+    if bad:
+        report["summary"] += " Lecturas: " + "; ".join(f"{r['name']}: {r['reason']}" for r in bad)
+    else:
+        report["summary"] += f" Lecturas: {len(readings)} correcta(s)."
+    if order[status] > order[report["status"]]:
+        report["status"] = status
+        report["score"] = round(min(report["score"], 60.0 if status == "REVISAR" else 30.0), 1)
 
 
 def _folder() -> str:
