@@ -2,6 +2,7 @@ import {
   Camera,
   Database,
   FileUp,
+  GitCompareArrows,
   Orbit,
   ScanSearch,
   Settings,
@@ -112,6 +113,28 @@ export default function Layout() {
                   />
 
                   <span>Inspection</span>
+
+                  {isActive && (
+                    <span className="absolute inset-x-3 bottom-0 h-0.5 rounded-t bg-emerald-400" />
+                  )}
+                </>
+              )}
+            </NavLink>
+
+            <NavLink to="/compare" className={link}>
+              {({ isActive }) => (
+                <>
+                  <GitCompareArrows
+                    size={16}
+                    strokeWidth={1.8}
+                    className={
+                      isActive
+                        ? "text-emerald-400"
+                        : "text-zinc-500 transition-colors group-hover:text-zinc-300"
+                    }
+                  />
+
+                  <span>Comparador</span>
 
                   {isActive && (
                     <span className="absolute inset-x-3 bottom-0 h-0.5 rounded-t bg-emerald-400" />
