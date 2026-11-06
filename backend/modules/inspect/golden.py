@@ -305,7 +305,9 @@ def segment_panel(
     if not contours:
         return None
     largest = max(contours, key=cv2.contourArea)
-    return (largest / scale).reshape(-1, 2).astype(np.float32)
+    # Mismo afinado de borde que usa el alta de la pieza, para que medir y dar de alta coincidan.
+    no_points = np.zeros((0, 2), np.float32)
+    return _refine_edges(image, (largest / scale).reshape(-1, 2).astype(np.float32), no_points, np.zeros(0, np.float32))
 
 
 def _plate_features(image: np.ndarray, features: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -343,7 +345,7 @@ def _plate_features(image: np.ndarray, features: list[dict[str, Any]]) -> list[d
 # Un pixel se descarta del contorno si su color (a, b de Lab) se aleja de la placa mas que esto,
 # medido en desviaciones robustas del color de la placa (con un piso para placas casi neutras).
 # Solidez (area / area del casco) desde la cual el contorno se sustituye por su casco convexo.
-HULL_MIN_SOLIDITY = 0.88
+HULL_MIN_SOLIDITY = 0.985
 OFF_COLOR_SIGMAS = 3.0
 OFF_COLOR_MIN_DISTANCE = 4.5
 
@@ -386,6 +388,66 @@ def _drop_off_color(
     cleaned = cv2.morphologyEx(cleaned, cv2.MORPH_OPEN, kernel)
     cleaned = cv2.morphologyEx(cleaned, cv2.MORPH_CLOSE, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (9, 9)))
     return cleaned if cv2.countNonZero(cleaned) >= 0.5 * cv2.countNonZero(segmented) else segmented
+
+
+# Banda (fraccion del lado mayor) alrededor del contorno aproximado donde se afina el borde.
+REFINE_BAND = 0.025
+REFINE_MAX_SIDE = 1600
+# Ancho (fraccion del lado mayor) por debajo del cual una punta del contorno se considera rebaba.
+REFINE_SPUR = 0.01
+# Al inspeccionar la pieza ya esta alineada: el borde solo puede moverse esta fraccion del lado corto.
+INSPECT_BAND_RATIO = 0.04
+
+
+def _refine_edges(
+    image: np.ndarray, contour: np.ndarray, points: np.ndarray, radii: np.ndarray, band_ratio: float = 0.12
+) -> np.ndarray:
+    """Segundo GrabCut a mayor resolucion, solo en una banda angosta del contorno aproximado.
+
+    El primer paso trabaja reducido y deja el borde redondeado; aqui el interior seguro y el exterior
+    seguro quedan fuera de la banda y GrabCut decide el borde real dentro de ella, asi se siguen
+    pestanas, escalones y bordes inclinados de la pieza. Si el resultado se aleja mucho del primero
+    (se fugo a la mesa) se conserva el contorno aproximado.
+    """
+    height, width = image.shape[:2]
+    scale = min(1.0, REFINE_MAX_SIDE / max(height, width))
+    work = cv2.resize(image, None, fx=scale, fy=scale, interpolation=cv2.INTER_AREA) if scale < 1.0 else image
+    wh, ww = work.shape[:2]
+    shape = np.zeros((wh, ww), np.uint8)
+    cv2.fillPoly(shape, [(contour * scale).astype(np.int32)], 255)
+    # La banda no debe pasar de una fraccion del lado corto: en una tira angosta una banda ancha deja
+    # que el borde baile varios pixeles entre una medicion y otra.
+    short_side = min(cv2.minAreaRect((contour * scale).astype(np.float32))[1])
+    band = max(3, int(min(REFINE_BAND * max(wh, ww), band_ratio * short_side)))
+    kernel = lambda size: cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * size + 1, 2 * size + 1))
+    inner = cv2.erode(shape, kernel(band))
+    outer = cv2.dilate(shape, kernel(band))
+    mask = np.full((wh, ww), cv2.GC_BGD, np.uint8)
+    mask[outer > 0] = cv2.GC_PR_BGD
+    mask[shape > 0] = cv2.GC_PR_FGD
+    mask[inner > 0] = cv2.GC_FGD
+    border = max(2, int(0.004 * max(wh, ww)))
+    mask[:border, :] = mask[-border:, :] = mask[:, :border] = mask[:, -border:] = cv2.GC_BGD
+    background, foreground = np.zeros((1, 65)), np.zeros((1, 65))
+    try:
+        cv2.grabCut(work, mask, None, background, foreground, 4, cv2.GC_INIT_WITH_MASK)
+    except cv2.error:
+        return contour
+    refined = ((mask == cv2.GC_FGD) | (mask == cv2.GC_PR_FGD)).astype(np.uint8) * 255
+    for (x, y), radius in zip(points * scale, radii * scale):
+        cv2.circle(refined, (int(x), int(y)), int(1.3 * radius) + 1, 255, -1)
+    # Rebabas y puntas sueltas (restos de la mesa, borde negro del encuadre): hasta ~1 % del lado mayor u 8 % del corto.
+    spur = max(5, int(max(REFINE_SPUR * max(wh, ww), 0.08 * short_side)) | 1)
+    refined = cv2.morphologyEx(refined, cv2.MORPH_OPEN, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (spur, spur)))
+    refined = cv2.morphologyEx(refined, cv2.MORPH_CLOSE, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7)))
+    contours, _ = cv2.findContours(refined, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
+    if not contours:
+        return contour
+    best = max(contours, key=cv2.contourArea)
+    overlap = cv2.countNonZero(cv2.bitwise_and(refined, shape)) / max(cv2.countNonZero(shape), 1)
+    if overlap < 0.9 or cv2.contourArea(best) < 0.8 * cv2.countNonZero(shape):
+        return contour
+    return (best / scale).reshape(-1, 2).astype(np.float32)
 
 
 def segment_panel_from_features(image: np.ndarray, features: list[dict[str, Any]]) -> np.ndarray | None:
@@ -454,6 +516,8 @@ def segment_panel_from_features(image: np.ndarray, features: list[dict[str, Any]
         return sum(cv2.pointPolygonTest(contour, (float(x), float(y)), False) >= 0 for x, y in points)
 
     best = max(contours, key=lambda c: (covered(c), cv2.contourArea(c)))
+    best = _refine_edges(image, (best / scale).astype(np.float32), points / scale, radii / scale)
+    scale = 1.0
     # Las piezas son casi convexas: una muesca pequena es un reflejo o una sombra, no la forma.
     hull = cv2.convexHull(best)
     if cv2.contourArea(best) >= HULL_MIN_SOLIDITY * cv2.contourArea(hull):
@@ -541,6 +605,8 @@ def analyze_reference(
             "Amplíe el recorte, mejore la iluminación o enfoque."
         )
 
+    epsilon = 0.003 * cv2.arcLength(contour, True)
+    polygon = cv2.approxPolyDP(contour, epsilon, True).reshape(-1, 2).astype(np.float64)
     rect = cv2.minAreaRect(contour)
     long_px = max(rect[1])
     short_px = min(rect[1])
@@ -578,8 +644,6 @@ def analyze_reference(
             "saturation": item["saturation"],
         })
 
-    epsilon = 0.003 * cv2.arcLength(contour, True)
-    polygon = cv2.approxPolyDP(contour, epsilon, True).reshape(-1, 2).astype(np.float64)
     contour_ref = [[round(float(px * scale), 4), round(float(-py * scale), 4)] for px, py in polygon]
     xs = [point[0] for point in contour_ref]
     ys = [point[1] for point in contour_ref]
@@ -663,7 +727,11 @@ def check_contour(
     expected = np.float32([
         [(x - xmin_c) * scale, (ymax_c - y) * scale] for x, y in golden["contour"]
     ])
-    segmented = segment_panel(rectified, None, expected)
+    # La pieza ya esta alineada: el borde se mide directamente en una banda alrededor del contorno esperado,
+    # igual que se afino al dar de alta, asi ambas mediciones comparten el mismo ruido.
+    segmented = _refine_edges(
+        rectified, expected, np.zeros((0, 2), np.float32), np.zeros(0, np.float32), band_ratio=INSPECT_BAND_RATIO
+    )
     result: dict[str, Any] = {"id": "CONTORNO", "type": "CONTORNO", "kind": "contour"}
     if segmented is None:
         result.update({"status": "FALLO", "score": 0.0, "reasons": ["No se pudo medir el contorno."], "checks": {}})
@@ -677,7 +745,9 @@ def check_contour(
     union = cv2.countNonZero(cv2.bitwise_or(mask_expected, mask_found))
     iou = cv2.countNonZero(cv2.bitwise_and(mask_expected, mask_found)) / max(union, 1)
 
-    rect = cv2.minAreaRect(segmented)
+    # Misma simplificacion que el contorno esperado: se comparan poligonos equivalentes.
+    simplified = cv2.approxPolyDP(segmented.reshape(-1, 1, 2), 0.003 * cv2.arcLength(segmented.reshape(-1, 1, 2), True), True)
+    rect = cv2.minAreaRect(simplified.reshape(-1, 2).astype(np.float32))
     measured_long = max(rect[1]) / scale
     measured_short = min(rect[1]) / scale
     expected_long = golden["dimensions"]["length"]

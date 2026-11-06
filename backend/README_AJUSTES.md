@@ -55,10 +55,15 @@ El contorno sale de GrabCut sembrado con los propios features y se limpia en tre
    sobre placa gris no hace nada.
    * `OFF_COLOR_SIGMAS` (3.0) y `OFF_COLOR_MIN_DISTANCE` (4.5): **bajarlos** recorta más
      agresivamente (si el contorno incluye mesa); **subirlos** recorta menos (si se come la placa).
-2. **Casco convexo**: si la silueta es casi convexa (`HULL_MIN_SOLIDITY` = 0.88) se sustituye por su
-   casco, lo que tapa muescas por reflejos o sombras. **Subir** a 0.95 lo limita a siluetas casi
-   perfectas; ponerlo en `1.1` lo desactiva (para piezas con entrantes reales, p. ej. una ranura).
-3. `segment_panel_from_features`: `grow(hull, …)` define cuánta zona «probable» tiene GrabCut; y el
+2. **Afinado de borde** (`_refine_edges`): segundo GrabCut a mayor resolución solo en una banda
+   alrededor del contorno aproximado; sigue pestañas, escalones y bordes descuadrados.
+   * `REFINE_BAND` (0.025 del lado mayor): cuánto puede moverse el borde al dar de alta la pieza.
+   * `INSPECT_BAND_RATIO` (0.04 del lado corto): lo mismo al inspeccionar (la pieza ya está alineada).
+     Más grande = mide desviaciones mayores pero admite más ruido del fondo.
+   * `REFINE_SPUR` (0.01): puntas/rebabas más angostas que esto se eliminan.
+3. **Casco convexo**: `HULL_MIN_SOLIDITY` (0.985) solo tapa ruido en siluetas casi perfectamente
+   convexas. Si lo bajas (0.88) también rellena pestañas y muescas reales: no lo hagas en piezas con ellas.
+4. `segment_panel_from_features`: `grow(hull, …)` define cuánta zona «probable» tiene GrabCut; y el
    punto 1.8×radio de cada feature es placa segura.
 
 Para probarlo visualmente corre el barrido (muestra el contorno y los features sobre cada foto):
